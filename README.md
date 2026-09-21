@@ -59,7 +59,7 @@ Everything lives in `.env` (see `.env.example` for the annotated list).
 
 | Setting | What it's for |
 | --- | --- |
-| `DATABASE_URL` | Postgres connection string. **Set this in production.** Unset locally to use the embedded database. |
+| `DATABASE_URL` | Postgres connection string. **Set this in production.** Unset locally to use the embedded database. Check it with `npm run check-db`. |
 | `PGLITE_DIR` | Where the embedded database keeps its files. Default `./data/pgdata`. |
 | `PORT` | Port to listen on. Default `3000`. |
 | `APP_URL` | Public URL, used for the link inside recap emails. |
@@ -110,20 +110,49 @@ to run Node, and a Postgres database.
 
 ### 1. Create the database
 
-Sign up at [Neon](https://neon.tech) or [Supabase](https://supabase.com) — both
-have free tiers that don't expire — create a project, and copy the connection
-string. It looks like:
-
-```
-postgresql://user:password@ep-something.us-west-2.aws.neon.tech/dbname?sslmode=require
-```
-
-Everything the restaurant logs lives here. The app creates its own tables on
-first start; there's nothing to set up by hand.
+Sign up at [Supabase](https://supabase.com) or [Neon](https://neon.tech) — both
+have free tiers that don't expire — create a project, and copy its connection
+string. Everything the restaurant logs lives here. The app creates its own
+tables on first start; there is nothing to set up by hand, no SQL to run, and
+no schema to design in their dashboard.
 
 > Render's own free Postgres expires after 30 days, which is why this points
 > elsewhere. A paid Render database works fine too if you'd rather keep it all
 > in one place.
+
+**On Supabase**, the connection string is under **Project Settings → Database →
+Connection string**, and it offers more than one. Use the **Session pooler**
+(or the Transaction pooler); both have been tested against this app.
+
+Avoid **Direct connection**: Supabase serves it over IPv6 only, and many hosts —
+Render included — make outbound connections over IPv4, so it fails with a
+confusing "could not connect" rather than anything about IPv6.
+
+The string looks like this, and the `[YOUR-PASSWORD]` placeholder is literal —
+replace it with the database password you set when creating the project (reset
+it on that same page if you've lost it):
+
+```
+postgresql://postgres.abcdefgh:[YOUR-PASSWORD]@aws-0-us-west-1.pooler.supabase.com:5432/postgres
+```
+
+If your password contains `@`, `/`, `:` or `#`, percent-encode it — those
+characters otherwise split the URL in the wrong places. `@` becomes `%40`.
+
+Connecting your Supabase project to GitHub is unrelated to any of this; that
+feature creates preview databases per branch. It does no harm, but the
+connection string is the only thing this app needs.
+
+**Check the string before you deploy** — it's much easier to fix here than in
+a failing deploy:
+
+```bash
+DATABASE_URL='postgresql://…' npm run check-db
+```
+
+It connects, reports what it found, and names the likely cause when it can't:
+an IPv6-only host, a password that needs percent-encoding, a placeholder left
+in, a typo'd hostname. It never prints your password.
 
 ### 2. Deploy the app
 
@@ -137,6 +166,8 @@ click-through.
 3. When the first deploy finishes, Render shows the service's URL. Put that
    into `APP_URL` and save — recap emails link back to it.
 4. Open the **Shell** tab and run `npm run seed` to create your admin login.
+   (If the deploy failed, run `npm run check-db` there first — it will usually
+   say exactly what's wrong with the connection string.)
 5. Sign in at your Render URL and add your team.
 6. Fill in the `SMTP_*` values whenever you're ready for emailed recaps, then
    use **Test the email connection** in Settings.
@@ -193,7 +224,9 @@ delivery against a fake mail server.
 
 The second command is the one that proves the production path — the network
 driver, connection pooling and transactions — rather than the embedded engine.
-Point it at any server with `PGURL=postgres://…`.
+Point it at any server with `PGURL=postgres://…`, including a connection pooler:
+the suite has been run against PgBouncer in transaction mode, which is how
+Supabase serves connections.
 
 ## How it's built
 
@@ -211,7 +244,7 @@ src/
   mail.js          SMTP
   routes/          auth · shifts · admin
 public/            The client: index.html, app.js, styles.css
-scripts/           seed · export · test-postgres
+scripts/           seed · check-db · export · test-postgres
 test/              API, concurrency and email integration tests
 ```
 

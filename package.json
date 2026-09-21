@@ -12,7 +12,8 @@
     "dev": "node --no-warnings --watch src/server.js",
     "seed": "node --no-warnings scripts/seed.js",
     "test": "node --no-warnings --test test/*.test.js",
-    "export": "node --no-warnings scripts/export.js"
+    "export": "node --no-warnings scripts/export.js",
+    "check-db": "node --no-warnings scripts/check-db.js"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
