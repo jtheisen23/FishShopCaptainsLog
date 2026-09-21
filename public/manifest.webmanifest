@@ -1,0 +1,13 @@
+{
+  "name": "Fish Shop Captain's Log",
+  "short_name": "Captain's Log",
+  "description": "Shift checklist and running log for restaurant managers and staff.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef1f7",
+  "theme_color": "#26418f",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
