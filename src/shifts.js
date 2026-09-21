@@ -1,4 +1,4 @@
-import { db, nowIso, logEvent, transaction, getJsonSetting } from './db.js';
+import { query, one, all, nowIso, logEvent, transaction, getJsonSetting } from './db.js';
 import { config } from './config.js';
 import { SECTIONS, ITEM_INDEX, TOTAL_ITEMS, TEMPLATE_VERSION, isKnownItem } from './template.js';
 
@@ -64,162 +64,179 @@ export const isBusinessDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value
 export const locations = () => getJsonSetting('locations', ['Point Loma', 'Pacific Beach']);
 export const shiftTypes = () => getJsonSetting('shift_types', ['AM', 'PM']);
 
-export function getShift(id) {
-  return db.prepare('SELECT * FROM shifts WHERE id = ?').get(Number(id));
+export async function getShift(id) {
+  const numeric = Number(id);
+  if (!Number.isInteger(numeric)) return undefined;
+  return one('SELECT * FROM shifts WHERE id = $1', [numeric]);
 }
 
-export function findShift({ location, businessDate, shiftType }) {
-  return db
-    .prepare('SELECT * FROM shifts WHERE location = ? AND business_date = ? AND shift_type = ?')
-    .get(location, businessDate, shiftType);
+export async function findShift({ location, businessDate, shiftType }) {
+  return one('SELECT * FROM shifts WHERE location = $1 AND business_date = $2 AND shift_type = $3', [
+    location,
+    businessDate,
+    shiftType,
+  ]);
 }
 
 /**
  * Return the shift for this location/date/type, creating it on first touch.
- * Two devices opening the same shift at once is normal and safe: the unique
- * index makes the loser of the race fall back to reading the winner's row.
+ * Two devices opening the same shift at once is normal: ON CONFLICT makes the
+ * insert a no-op for the loser, who then reads the winner's row.
  */
-export function openShift({ location, businessDate, shiftType, user }) {
-  const existing = findShift({ location, businessDate, shiftType });
-  if (existing) return existing;
+export async function openShift({ location, businessDate, shiftType, user }) {
+  const inserted = await one(
+    `INSERT INTO shifts(location, business_date, shift_type, template_version, status, opened_by, opened_at)
+     VALUES($1, $2, $3, $4, 'open', $5, $6)
+     ON CONFLICT (location, business_date, shift_type) DO NOTHING
+     RETURNING *`,
+    [location, businessDate, shiftType, TEMPLATE_VERSION, user.id, nowIso()]
+  );
 
-  try {
-    const info = db
-      .prepare(
-        `INSERT INTO shifts(location, business_date, shift_type, template_version, status, opened_by, opened_at)
-         VALUES(?, ?, ?, ?, 'open', ?, ?)`
-      )
-      .run(location, businessDate, shiftType, TEMPLATE_VERSION, user.id, nowIso());
-    const shift = getShift(Number(info.lastInsertRowid));
-    logEvent({
-      shiftId: shift.id,
+  if (inserted) {
+    await logEvent({
+      shiftId: inserted.id,
       userId: user.id,
       type: 'shift_opened',
       detail: `${location} · ${businessDate} · ${shiftType}`,
     });
-    return shift;
-  } catch (error) {
-    const raced = findShift({ location, businessDate, shiftType });
-    if (raced) return raced;
-    throw error;
+    return inserted;
   }
+
+  return findShift({ location, businessDate, shiftType });
 }
 
-export function closeShift(shift, user, summary) {
-  return transaction(() => {
-    db.prepare('UPDATE shifts SET status = ?, closed_by = ?, closed_at = ?, summary = ? WHERE id = ?').run(
+export async function closeShift(shift, user, summary) {
+  await transaction(async (tx) => {
+    await tx.query('UPDATE shifts SET status = $1, closed_by = $2, closed_at = $3, summary = $4 WHERE id = $5', [
       'closed',
       user.id,
       nowIso(),
-      String(summary || shift.summary || ''),
-      shift.id
+      String(summary ?? shift.summary ?? ''),
+      shift.id,
+    ]);
+    await logEvent(
+      { shiftId: shift.id, userId: user.id, type: 'shift_closed', detail: summary ? 'with summary' : '' },
+      tx
     );
-    logEvent({ shiftId: shift.id, userId: user.id, type: 'shift_closed', detail: summary ? 'with summary' : '' });
-    return getShift(shift.id);
   });
-}
-
-export function reopenShift(shift, user) {
-  db.prepare('UPDATE shifts SET status = ?, closed_by = NULL, closed_at = NULL WHERE id = ?').run('open', shift.id);
-  logEvent({ shiftId: shift.id, userId: user.id, type: 'shift_reopened' });
   return getShift(shift.id);
 }
 
-export function updateSummary(shift, user, summary) {
-  db.prepare('UPDATE shifts SET summary = ? WHERE id = ?').run(String(summary || ''), shift.id);
-  logEvent({ shiftId: shift.id, userId: user.id, type: 'summary_updated' });
+export async function reopenShift(shift, user) {
+  await transaction(async (tx) => {
+    await tx.query('UPDATE shifts SET status = $1, closed_by = NULL, closed_at = NULL WHERE id = $2', [
+      'open',
+      shift.id,
+    ]);
+    await logEvent({ shiftId: shift.id, userId: user.id, type: 'shift_reopened' }, tx);
+  });
   return getShift(shift.id);
+}
+
+export async function updateSummary(shift, user, summary) {
+  await transaction(async (tx) => {
+    await tx.query('UPDATE shifts SET summary = $1 WHERE id = $2', [String(summary || ''), shift.id]);
+    await logEvent({ shiftId: shift.id, userId: user.id, type: 'summary_updated' }, tx);
+  });
+  return getShift(shift.id);
+}
+
+export async function markRecapSent(shiftId, user, recipients) {
+  await transaction(async (tx) => {
+    await tx.query('UPDATE shifts SET recap_sent_at = $1 WHERE id = $2', [nowIso(), Number(shiftId)]);
+    await logEvent(
+      { shiftId: Number(shiftId), userId: user.id, type: 'recap_sent', detail: recipients.join(', ') },
+      tx
+    );
+  });
 }
 
 /* ------------------------------------------------------------------ *
  * Checks
  * ------------------------------------------------------------------ */
 
-function currentCheck(shiftId, itemKey) {
-  return db.prepare('SELECT * FROM checks WHERE shift_id = ? AND item_key = ?').get(shiftId, itemKey);
-}
-
-function upsertCheck(shiftId, itemKey, fields) {
-  const existing = currentCheck(shiftId, itemKey);
-  if (existing) {
-    const next = { ...existing, ...fields, updated_at: nowIso() };
-    db.prepare(
-      `UPDATE checks SET state = ?, note = ?, flagged = ?, checked_by = ?, checked_at = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(next.state, next.note, next.flagged ? 1 : 0, next.checked_by, next.checked_at, next.updated_at, existing.id);
-    return currentCheck(shiftId, itemKey);
+/**
+ * Create or update one item's row in a single statement. Doing this as an
+ * upsert rather than read-then-write keeps two devices touching the same item
+ * at the same moment from racing each other.
+ */
+async function upsertCheck(tx, shiftId, itemKey, fields) {
+  const sets = [];
+  const values = [shiftId, itemKey, nowIso()];
+  for (const [column, value] of Object.entries(fields)) {
+    values.push(value);
+    sets.push(`${column} = $${values.length}`);
   }
-  const row = {
-    state: 'open',
-    note: '',
-    flagged: 0,
-    checked_by: null,
-    checked_at: null,
-    ...fields,
-  };
-  db.prepare(
-    `INSERT INTO checks(shift_id, item_key, state, note, flagged, checked_by, checked_at, updated_at)
-     VALUES(?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(shiftId, itemKey, row.state, row.note, row.flagged ? 1 : 0, row.checked_by, row.checked_at, nowIso());
-  return currentCheck(shiftId, itemKey);
+
+  const insertColumns = ['shift_id', 'item_key', 'updated_at', ...Object.keys(fields)];
+  const insertPlaceholders = insertColumns.map((_, index) => `$${index + 1}`);
+
+  const row = await tx.query(
+    `INSERT INTO checks(${insertColumns.join(', ')})
+     VALUES(${insertPlaceholders.join(', ')})
+     ON CONFLICT (shift_id, item_key) DO UPDATE SET ${sets.join(', ')}, updated_at = $3
+     RETURNING *`,
+    values
+  );
+  return row.rows[0];
 }
 
 /** Tick, untick, or mark N/A. Stamps who and when on every completion. */
-export function setCheckState(shift, itemKey, state, user) {
+export async function setCheckState(shift, itemKey, state, user) {
   if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
   if (!CHECK_STATES.includes(state)) throw Object.assign(new Error('Invalid state.'), { status: 400 });
 
-  return transaction(() => {
+  return transaction(async (tx) => {
     const isComplete = state !== 'open';
-    const check = upsertCheck(shift.id, itemKey, {
+    const check = await upsertCheck(tx, shift.id, itemKey, {
       state,
       checked_by: isComplete ? user.id : null,
       checked_at: isComplete ? nowIso() : null,
     });
     const type = state === 'done' ? 'item_done' : state === 'na' ? 'item_na' : 'item_reopened';
-    logEvent({ shiftId: shift.id, userId: user.id, type, itemKey, detail: ITEM_INDEX.get(itemKey).label });
+    await logEvent({ shiftId: shift.id, userId: user.id, type, itemKey, detail: ITEM_INDEX.get(itemKey).label }, tx);
     return check;
   });
 }
 
-export function setCheckNote(shift, itemKey, note, user) {
+export async function setCheckNote(shift, itemKey, note, user) {
   if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
   const text = String(note || '').slice(0, 2000);
 
-  return transaction(() => {
-    const check = upsertCheck(shift.id, itemKey, { note: text });
-    logEvent({
-      shiftId: shift.id,
-      userId: user.id,
-      type: text ? 'note_added' : 'note_cleared',
-      itemKey,
-      detail: text,
-    });
+  return transaction(async (tx) => {
+    const check = await upsertCheck(tx, shift.id, itemKey, { note: text });
+    await logEvent(
+      { shiftId: shift.id, userId: user.id, type: text ? 'note_added' : 'note_cleared', itemKey, detail: text },
+      tx
+    );
     return check;
   });
 }
 
-export function setCheckFlag(shift, itemKey, flagged, user) {
+export async function setCheckFlag(shift, itemKey, flagged, user) {
   if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
 
-  return transaction(() => {
-    const check = upsertCheck(shift.id, itemKey, { flagged: flagged ? 1 : 0 });
-    logEvent({
-      shiftId: shift.id,
-      userId: user.id,
-      type: flagged ? 'flag_raised' : 'flag_cleared',
-      itemKey,
-      detail: ITEM_INDEX.get(itemKey).label,
-    });
+  return transaction(async (tx) => {
+    const check = await upsertCheck(tx, shift.id, itemKey, { flagged: Boolean(flagged) });
+    await logEvent(
+      {
+        shiftId: shift.id,
+        userId: user.id,
+        type: flagged ? 'flag_raised' : 'flag_cleared',
+        itemKey,
+        detail: ITEM_INDEX.get(itemKey).label,
+      },
+      tx
+    );
     return check;
   });
 }
 
 /** A free-text entry in the running log, not tied to any checklist item. */
-export function addLogEntry(shift, text, user) {
+export async function addLogEntry(shift, text, user) {
   const detail = String(text || '').trim().slice(0, 2000);
   if (!detail) throw Object.assign(new Error('Log entry cannot be empty.'), { status: 400 });
-  logEvent({ shiftId: shift.id, userId: user.id, type: 'log_entry', detail });
+  await logEvent({ shiftId: shift.id, userId: user.id, type: 'log_entry', detail });
   return detail;
 }
 
@@ -227,8 +244,8 @@ export function addLogEntry(shift, text, user) {
  * Reading a shift back out
  * ------------------------------------------------------------------ */
 
-function userNames() {
-  const rows = db.prepare('SELECT id, name FROM users').all();
+async function userNames() {
+  const rows = await all('SELECT id, name FROM users');
   return new Map(rows.map((r) => [r.id, r.name]));
 }
 
@@ -236,12 +253,16 @@ function userNames() {
  * The full state of one shift: every template section with its items merged
  * against what's been checked, plus the running log and progress counts.
  */
-export function shiftDetail(shiftId) {
-  const shift = getShift(shiftId);
+export async function shiftDetail(shiftId) {
+  const shift = await getShift(shiftId);
   if (!shift) return null;
 
-  const names = userNames();
-  const checkRows = db.prepare('SELECT * FROM checks WHERE shift_id = ?').all(shift.id);
+  const [names, checkRows, eventRows] = await Promise.all([
+    userNames(),
+    all('SELECT * FROM checks WHERE shift_id = $1', [shift.id]),
+    all('SELECT * FROM events WHERE shift_id = $1 ORDER BY id DESC LIMIT 300', [shift.id]),
+  ]);
+
   const byKey = new Map(checkRows.map((row) => [row.item_key, row]));
 
   let done = 0;
@@ -277,19 +298,16 @@ export function shiftDetail(shiftId) {
     };
   });
 
-  const events = db
-    .prepare('SELECT * FROM events WHERE shift_id = ? ORDER BY id DESC LIMIT 300')
-    .all(shift.id)
-    .map((event) => ({
-      id: event.id,
-      type: event.type,
-      itemKey: event.item_key,
-      itemLabel: event.item_key ? ITEM_INDEX.get(event.item_key)?.label || event.item_key : null,
-      detail: event.detail,
-      user: event.user_id ? names.get(event.user_id) || 'Unknown' : 'System',
-      createdAt: event.created_at,
-      timeLabel: formatTime(event.created_at),
-    }));
+  const events = eventRows.map((event) => ({
+    id: event.id,
+    type: event.type,
+    itemKey: event.item_key,
+    itemLabel: event.item_key ? ITEM_INDEX.get(event.item_key)?.label || event.item_key : null,
+    detail: event.detail,
+    user: event.user_id ? names.get(event.user_id) || 'Unknown' : 'System',
+    createdAt: event.created_at,
+    timeLabel: formatTime(event.created_at),
+  }));
 
   return {
     shift: {
@@ -315,53 +333,56 @@ export function shiftDetail(shiftId) {
   };
 }
 
-export function listShifts({ location, from, to, limit = 60 } = {}) {
+export async function listShifts({ location, from, to, limit = 60 } = {}) {
   const where = [];
   const params = [];
+
   if (location) {
-    where.push('s.location = ?');
     params.push(location);
+    where.push(`s.location = $${params.length}`);
   }
   if (isBusinessDate(from)) {
-    where.push('s.business_date >= ?');
     params.push(from);
+    where.push(`s.business_date >= $${params.length}`);
   }
   if (isBusinessDate(to)) {
-    where.push('s.business_date <= ?');
     params.push(to);
+    where.push(`s.business_date <= $${params.length}`);
   }
+  params.push(Math.min(Number(limit) || 60, 200));
+
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-  return db
-    .prepare(
-      `SELECT s.*,
-              opener.name AS opened_by_name,
-              closer.name AS closed_by_name,
-              (SELECT COUNT(*) FROM checks c WHERE c.shift_id = s.id AND c.state <> 'open') AS done_count,
-              (SELECT COUNT(*) FROM checks c WHERE c.shift_id = s.id AND c.flagged = 1) AS flag_count
-       FROM shifts s
-       LEFT JOIN users opener ON opener.id = s.opened_by
-       LEFT JOIN users closer ON closer.id = s.closed_by
-       ${clause}
-       ORDER BY s.business_date DESC, s.shift_type ASC, s.id DESC
-       LIMIT ?`
-    )
-    .all(...params, Math.min(Number(limit) || 60, 200))
-    .map((row) => ({
-      id: row.id,
-      location: row.location,
-      businessDate: row.business_date,
-      businessDateLabel: formatBusinessDate(row.business_date),
-      shiftType: row.shift_type,
-      status: row.status,
-      openedBy: row.opened_by_name,
-      openedAtLabel: formatTime(row.opened_at),
-      closedBy: row.closed_by_name,
-      closedAtLabel: formatTime(row.closed_at),
-      recapSentAt: row.recap_sent_at,
-      done: row.done_count,
-      total: TOTAL_ITEMS,
-      flagged: row.flag_count,
-      percent: Math.round((row.done_count / TOTAL_ITEMS) * 100),
-    }));
+  const rows = await all(
+    `SELECT s.*,
+            opener.name AS opened_by_name,
+            closer.name AS closed_by_name,
+            (SELECT COUNT(*)::int FROM checks c WHERE c.shift_id = s.id AND c.state <> 'open') AS done_count,
+            (SELECT COUNT(*)::int FROM checks c WHERE c.shift_id = s.id AND c.flagged = TRUE) AS flag_count
+     FROM shifts s
+     LEFT JOIN users opener ON opener.id = s.opened_by
+     LEFT JOIN users closer ON closer.id = s.closed_by
+     ${clause}
+     ORDER BY s.business_date DESC, s.shift_type ASC, s.id DESC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    location: row.location,
+    businessDate: row.business_date,
+    businessDateLabel: formatBusinessDate(row.business_date),
+    shiftType: row.shift_type,
+    status: row.status,
+    openedBy: row.opened_by_name,
+    openedAtLabel: formatTime(row.opened_at),
+    closedBy: row.closed_by_name,
+    closedAtLabel: formatTime(row.closed_at),
+    recapSentAt: row.recap_sent_at,
+    done: row.done_count,
+    total: TOTAL_ITEMS,
+    flagged: row.flag_count,
+    percent: Math.round((row.done_count / TOTAL_ITEMS) * 100),
+  }));
 }

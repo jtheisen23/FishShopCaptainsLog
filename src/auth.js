@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { db, nowIso, logEvent } from './db.js';
+import { query, one, all, nowIso, logEvent } from './db.js';
 import { config } from './config.js';
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 64 };
@@ -49,28 +49,30 @@ const ROLE_RANK = { staff: 1, manager: 2, admin: 3 };
 
 export const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
-export function createUser({ email, name, password, role = 'staff', mustChangePassword = false }) {
-  const stmt = db.prepare(`
-    INSERT INTO users(email, name, role, password_hash, active, must_change_password, created_at)
-    VALUES(?, ?, ?, ?, 1, ?, ?)
-  `);
-  const info = stmt.run(
-    normalizeEmail(email),
-    String(name).trim(),
-    role,
-    hashPassword(password),
-    mustChangePassword ? 1 : 0,
-    nowIso()
+export async function createUser({ email, name, password, role = 'staff', mustChangePassword = false }) {
+  const row = await one(
+    `INSERT INTO users(email, name, role, password_hash, active, must_change_password, created_at)
+     VALUES($1, $2, $3, $4, TRUE, $5, $6) RETURNING id`,
+    [normalizeEmail(email), String(name).trim(), role, hashPassword(password), Boolean(mustChangePassword), nowIso()]
   );
-  return findUserById(Number(info.lastInsertRowid));
+  return findUserById(row.id);
 }
 
-export function findUserByEmail(email) {
-  return db.prepare('SELECT * FROM users WHERE email = ?').get(normalizeEmail(email));
+export async function findUserByEmail(email) {
+  return one('SELECT * FROM users WHERE email = $1', [normalizeEmail(email)]);
 }
 
-export function findUserById(id) {
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+export async function findUserById(id) {
+  return one('SELECT * FROM users WHERE id = $1', [id]);
+}
+
+export async function listUsers() {
+  return all('SELECT * FROM users ORDER BY active DESC, LOWER(name)');
+}
+
+export async function countUsers() {
+  const row = await one('SELECT COUNT(*)::int AS n FROM users');
+  return row.n;
 }
 
 export function publicUser(user) {
@@ -96,38 +98,38 @@ export function hasRole(user, minimum) {
 
 const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
-export function createSession(userId, userAgent = '') {
+export async function createSession(userId, userAgent = '') {
   const token = crypto.randomBytes(32).toString('base64url');
   const expires = new Date(Date.now() + config.sessionDays * 86400_000);
-  db.prepare(
-    'INSERT INTO sessions(token_hash, user_id, created_at, expires_at, user_agent) VALUES(?, ?, ?, ?, ?)'
-  ).run(hashToken(token), userId, nowIso(), expires.toISOString(), String(userAgent).slice(0, 300));
+  await query(
+    'INSERT INTO sessions(token_hash, user_id, created_at, expires_at, user_agent) VALUES($1, $2, $3, $4, $5)',
+    [hashToken(token), userId, nowIso(), expires.toISOString(), String(userAgent).slice(0, 300)]
+  );
   return { token, expires };
 }
 
-export function destroySession(token) {
+export async function destroySession(token) {
   if (!token) return;
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token));
+  await query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(token)]);
 }
 
-export function destroyAllSessionsForUser(userId) {
-  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+export async function destroyAllSessionsForUser(userId) {
+  await query('DELETE FROM sessions WHERE user_id = $1', [userId]);
 }
 
-export function userForToken(token) {
+export async function userForToken(token) {
   if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.* FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1`
-    )
-    .get(hashToken(token), nowIso());
+  const row = await one(
+    `SELECT u.* FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = $1 AND s.expires_at > $2 AND u.active = TRUE`,
+    [hashToken(token), nowIso()]
+  );
   return row || null;
 }
 
-export function purgeExpiredSessions() {
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(nowIso());
+export async function purgeExpiredSessions() {
+  await query('DELETE FROM sessions WHERE expires_at <= $1', [nowIso()]);
 }
 
 /* ------------------------------------------------------------------ *
@@ -165,11 +167,15 @@ export function clearLoginAttempts(key) {
  * Express middleware
  * ------------------------------------------------------------------ */
 
-export function attachUser(req, _res, next) {
-  const token = req.cookies?.[config.sessionCookie];
-  req.sessionToken = token || null;
-  req.user = userForToken(token);
-  next();
+export async function attachUser(req, _res, next) {
+  try {
+    const token = req.cookies?.[config.sessionCookie];
+    req.sessionToken = token || null;
+    req.user = await userForToken(token);
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 export function requireAuth(req, res, next) {
@@ -206,7 +212,11 @@ export function clearSessionCookie(res) {
   });
 }
 
-export function recordLogin(user, req) {
-  db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(nowIso(), user.id);
-  logEvent({ userId: user.id, type: 'user_signed_in', detail: String(req.headers['user-agent'] || '').slice(0, 200) });
+export async function recordLogin(user, req) {
+  await query('UPDATE users SET last_login_at = $1 WHERE id = $2', [nowIso(), user.id]);
+  await logEvent({
+    userId: user.id,
+    type: 'user_signed_in',
+    detail: String(req.headers['user-agent'] || '').slice(0, 200),
+  });
 }

@@ -1,8 +1,8 @@
 import path from 'node:path';
 import express from 'express';
 import { config, ROOT, smtpConfigured } from './config.js';
-import { db, logEvent } from './db.js';
-import { attachUser, purgeExpiredSessions } from './auth.js';
+import { initDb, closeDb, driver } from './db.js';
+import { attachUser, purgeExpiredSessions, countUsers } from './auth.js';
 import { cookieParser, sameOriginOnly } from './routes/helpers.js';
 import { authRouter } from './routes/auth.js';
 import { shiftsRouter } from './routes/shifts.js';
@@ -18,9 +18,19 @@ app.use(cookieParser);
 app.use(sameOriginOnly);
 app.use(attachUser);
 
-app.get('/api/health', (_req, res) => {
-  const users = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
-  res.json({ ok: true, users, emailEnabled: smtpConfigured, timezone: config.timezone });
+app.get('/api/health', async (_req, res) => {
+  try {
+    res.json({
+      ok: true,
+      users: await countUsers(),
+      database: driver,
+      emailEnabled: smtpConfigured,
+      timezone: config.timezone,
+    });
+  } catch (error) {
+    // Health must report a database it can't reach, not pretend to be fine.
+    res.status(503).json({ ok: false, error: error.message });
+  }
 });
 
 app.use('/api/auth', authRouter);
@@ -48,25 +58,28 @@ app.use((error, req, res, _next) => {
   res.status(status).json({ error: deliberate ? error.message : 'Something went wrong on the server.' });
 });
 
-function start() {
-  purgeExpiredSessions();
-  setInterval(purgeExpiredSessions, 6 * 60 * 60 * 1000).unref();
+export async function start() {
+  await initDb();
+
+  await purgeExpiredSessions();
+  setInterval(() => {
+    purgeExpiredSessions().catch((error) => console.error('[session purge]', error.message));
+  }, 6 * 60 * 60 * 1000).unref();
+
+  const userCount = await countUsers();
 
   const server = app.listen(config.port, () => {
-    const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
     console.log(`${config.brandName} listening on http://localhost:${config.port}`);
-    console.log(`  timezone: ${config.timezone}   email: ${smtpConfigured ? 'configured' : 'NOT configured'}`);
+    console.log(
+      `  database: ${driver}   timezone: ${config.timezone}   email: ${smtpConfigured ? 'configured' : 'NOT configured'}`
+    );
     if (userCount === 0) console.log('  No users yet — run `npm run seed` to create the first admin.');
   });
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => {
-      server.close(() => {
-        try {
-          db.close();
-        } catch {
-          /* already closed */
-        }
+      server.close(async () => {
+        await closeDb();
         process.exit(0);
       });
     });
@@ -75,7 +88,11 @@ function start() {
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  start();
+  start().catch((error) => {
+    console.error('Failed to start:', error.message);
+    if (error.message.includes('ECONNREFUSED') || error.message.includes('password')) {
+      console.error('Check DATABASE_URL — the app could not reach your Postgres database.');
+    }
+    process.exit(1);
+  });
 }
-
-export { start, logEvent };

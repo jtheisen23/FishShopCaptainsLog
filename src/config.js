@@ -31,7 +31,18 @@ const bool = (value, fallback) => {
 
 export const config = {
   port: Number(process.env.PORT || 3000),
-  dbPath: process.env.DB_PATH || path.join(ROOT, 'data', 'captains-log.db'),
+
+  /**
+   * Postgres connection string. Set it in production (Neon, Supabase, …) and
+   * the app needs no disk of its own. Leave it unset and the app runs an
+   * embedded Postgres out of `pgliteDir`, which is what local development and
+   * the test suite use.
+   */
+  databaseUrl: process.env.DATABASE_URL || '',
+  databaseSsl: bool(process.env.DATABASE_SSL, true),
+  /** Set false only if your provider's TLS chain won't verify from your host. */
+  databaseSslStrict: bool(process.env.DATABASE_SSL_STRICT, false),
+  pgliteDir: process.env.PGLITE_DIR || path.join(ROOT, 'data', 'pgdata'),
   /** Used for links in recap emails. */
   appUrl: (process.env.APP_URL || `http://localhost:${Number(process.env.PORT || 3000)}`).replace(/\/$/, ''),
   /** Business dates and every displayed time are computed in this zone. */

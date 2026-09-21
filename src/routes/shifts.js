@@ -1,11 +1,12 @@
 import express from 'express';
 import { requireAuth, requireRole, hasRole, publicUser } from '../auth.js';
-import { db, getJsonSetting, logEvent, nowIso } from '../db.js';
+import { getJsonSetting } from '../db.js';
 import { config, smtpConfigured } from '../config.js';
 import { SECTIONS, TOTAL_ITEMS } from '../template.js';
 import {
   openShift,
   getShift,
+  markRecapSent,
   shiftDetail,
   listShifts,
   closeShift,
@@ -33,7 +34,7 @@ export const shiftsRouter = express.Router();
  */
 shiftsRouter.get(
   '/bootstrap',
-  ah((req, res) => {
+  ah(async (req, res) => {
     if (!req.user) {
       return res.json({ user: null, brandName: config.brandName });
     }
@@ -42,11 +43,11 @@ shiftsRouter.get(
       brandName: config.brandName,
       timezone: config.timezone,
       today: businessDateFor(),
-      locations: locations(),
-      shiftTypes: shiftTypes(),
+      locations: await locations(),
+      shiftTypes: await shiftTypes(),
       template: { sections: SECTIONS, totalItems: TOTAL_ITEMS },
       emailEnabled: smtpConfigured,
-      defaultRecipients: hasRole(req.user, 'manager') ? getJsonSetting('recap_recipients', []) : [],
+      defaultRecipients: hasRole(req.user, 'manager') ? await getJsonSetting('recap_recipients', []) : [],
     });
   })
 );
@@ -55,8 +56,8 @@ shiftsRouter.get(
 shiftsRouter.use(requireAuth);
 
 /** Load a shift and make sure it's writable before a mutation goes through. */
-function loadShift(req, { mustBeOpen = false } = {}) {
-  const shift = getShift(req.params.id);
+async function loadShift(req, { mustBeOpen = false } = {}) {
+  const shift = await getShift(req.params.id);
   if (!shift) fail(404, 'That shift does not exist.');
   if (mustBeOpen && shift.status !== 'open') {
     fail(409, 'This shift is closed. A manager can reopen it if something needs changing.');
@@ -66,9 +67,9 @@ function loadShift(req, { mustBeOpen = false } = {}) {
 
 shiftsRouter.get(
   '/shifts',
-  ah((req, res) => {
+  ah(async (req, res) => {
     res.json({
-      shifts: listShifts({
+      shifts: await listShifts({
         location: req.query.location || undefined,
         from: req.query.from,
         to: req.query.to,
@@ -81,24 +82,24 @@ shiftsRouter.get(
 /** Open today's card, or return the one already running for that slot. */
 shiftsRouter.post(
   '/shifts',
-  ah((req, res) => {
+  ah(async (req, res) => {
     const location = String(req.body?.location || '').trim();
     const shiftType = String(req.body?.shiftType || '').trim();
     const businessDate = String(req.body?.businessDate || businessDateFor()).trim();
 
-    if (!locations().includes(location)) fail(400, 'Pick a valid location.');
-    if (!shiftTypes().includes(shiftType)) fail(400, 'Pick a valid shift.');
+    if (!(await locations()).includes(location)) fail(400, 'Pick a valid location.');
+    if (!(await shiftTypes()).includes(shiftType)) fail(400, 'Pick a valid shift.');
     if (!isBusinessDate(businessDate)) fail(400, 'Business date must look like YYYY-MM-DD.');
 
-    const shift = openShift({ location, businessDate, shiftType, user: req.user });
-    res.json(shiftDetail(shift.id));
+    const shift = await openShift({ location, businessDate, shiftType, user: req.user });
+    res.json(await shiftDetail(shift.id));
   })
 );
 
 shiftsRouter.get(
   '/shifts/:id',
-  ah((req, res) => {
-    const detail = shiftDetail(req.params.id);
+  ah(async (req, res) => {
+    const detail = await shiftDetail(req.params.id);
     if (!detail) fail(404, 'That shift does not exist.');
     res.json(detail);
   })
@@ -106,46 +107,46 @@ shiftsRouter.get(
 
 shiftsRouter.post(
   '/shifts/:id/items/:itemKey/state',
-  ah((req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    setCheckState(shift, req.params.itemKey, String(req.body?.state || 'done'), req.user);
-    res.json(shiftDetail(shift.id));
+  ah(async (req, res) => {
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await setCheckState(shift, req.params.itemKey, String(req.body?.state || 'done'), req.user);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
 shiftsRouter.post(
   '/shifts/:id/items/:itemKey/note',
-  ah((req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    setCheckNote(shift, req.params.itemKey, req.body?.note, req.user);
-    res.json(shiftDetail(shift.id));
+  ah(async (req, res) => {
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await setCheckNote(shift, req.params.itemKey, req.body?.note, req.user);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
 shiftsRouter.post(
   '/shifts/:id/items/:itemKey/flag',
-  ah((req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    setCheckFlag(shift, req.params.itemKey, Boolean(req.body?.flagged), req.user);
-    res.json(shiftDetail(shift.id));
+  ah(async (req, res) => {
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await setCheckFlag(shift, req.params.itemKey, Boolean(req.body?.flagged), req.user);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
 shiftsRouter.post(
   '/shifts/:id/log',
-  ah((req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    addLogEntry(shift, req.body?.text, req.user);
-    res.json(shiftDetail(shift.id));
+  ah(async (req, res) => {
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await addLogEntry(shift, req.body?.text, req.user);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
 shiftsRouter.post(
   '/shifts/:id/summary',
-  ah((req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    updateSummary(shift, req.user, req.body?.summary);
-    res.json(shiftDetail(shift.id));
+  ah(async (req, res) => {
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await updateSummary(shift, req.user, req.body?.summary);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
@@ -154,26 +155,26 @@ shiftsRouter.post(
   '/shifts/:id/close',
   requireRole('manager'),
   ah(async (req, res) => {
-    const shift = loadShift(req, { mustBeOpen: true });
-    closeShift(shift, req.user, req.body?.summary);
+    const shift = await loadShift(req, { mustBeOpen: true });
+    await closeShift(shift, req.user, req.body?.summary);
 
     let email = { attempted: false };
     if (req.body?.sendRecap) {
       email = await deliverRecap(shift.id, req.body?.recipients, req.user);
     }
 
-    res.json({ ...shiftDetail(shift.id), email });
+    res.json({ ...(await shiftDetail(shift.id)), email });
   })
 );
 
 shiftsRouter.post(
   '/shifts/:id/reopen',
   requireRole('manager'),
-  ah((req, res) => {
-    const shift = loadShift(req);
+  ah(async (req, res) => {
+    const shift = await loadShift(req);
     if (shift.status === 'open') fail(409, 'That shift is already open.');
-    reopenShift(shift, req.user);
-    res.json(shiftDetail(shift.id));
+    await reopenShift(shift, req.user);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
@@ -181,17 +182,17 @@ shiftsRouter.post(
   '/shifts/:id/recap/email',
   requireRole('manager'),
   ah(async (req, res) => {
-    const shift = loadShift(req);
+    const shift = await loadShift(req);
     const email = await deliverRecap(shift.id, req.body?.recipients, req.user);
-    res.json({ ...shiftDetail(shift.id), email });
+    res.json({ ...(await shiftDetail(shift.id)), email });
   })
 );
 
 /** Printable / viewable recap — handy for taping to the office wall. */
 shiftsRouter.get(
   '/shifts/:id/recap.html',
-  ah((req, res) => {
-    const recap = buildRecap(req.params.id);
+  ah(async (req, res) => {
+    const recap = await buildRecap(req.params.id);
     if (!recap) fail(404, 'That shift does not exist.');
     res.type('html').send(recapHtml(recap));
   })
@@ -199,18 +200,18 @@ shiftsRouter.get(
 
 shiftsRouter.get(
   '/shifts/:id/recap.txt',
-  ah((req, res) => {
-    const recap = buildRecap(req.params.id);
+  ah(async (req, res) => {
+    const recap = await buildRecap(req.params.id);
     if (!recap) fail(404, 'That shift does not exist.');
     res.type('text/plain; charset=utf-8').send(recapText(recap));
   })
 );
 
 async function deliverRecap(shiftId, recipientsInput, user) {
-  const recap = buildRecap(shiftId);
+  const recap = await buildRecap(shiftId);
   if (!recap) fail(404, 'That shift does not exist.');
 
-  const source = recipientsInput ?? getJsonSetting('recap_recipients', []);
+  const source = recipientsInput ?? (await getJsonSetting('recap_recipients', []));
   const { valid, invalid } = parseRecipients(source);
 
   if (!valid.length) {
@@ -229,8 +230,7 @@ async function deliverRecap(shiftId, recipientsInput, user) {
     html: recapHtml(recap),
   });
 
-  db.prepare('UPDATE shifts SET recap_sent_at = ? WHERE id = ?').run(nowIso(), Number(shiftId));
-  logEvent({ shiftId: Number(shiftId), userId: user.id, type: 'recap_sent', detail: valid.join(', ') });
+  await markRecapSent(shiftId, user, valid);
 
   return { attempted: true, sent: true, recipients: valid, invalid };
 }

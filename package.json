@@ -12,10 +12,12 @@
     "dev": "node --no-warnings --watch src/server.js",
     "seed": "node --no-warnings scripts/seed.js",
     "test": "node --no-warnings --test test/*.test.js",
-    "backup": "node --no-warnings scripts/backup.js"
+    "export": "node --no-warnings scripts/export.js"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "express": "^4.21.2",
-    "nodemailer": "^10.0.10"
+    "nodemailer": "^10.0.10",
+    "pg": "^8.23.0"
   }
 }

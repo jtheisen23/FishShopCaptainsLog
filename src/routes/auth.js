@@ -16,14 +16,14 @@ import {
   hashPassword,
   normalizeEmail,
 } from '../auth.js';
-import { db, logEvent } from '../db.js';
+import { query, logEvent } from '../db.js';
 import { ah, fail } from './helpers.js';
 
 export const authRouter = express.Router();
 
 authRouter.post(
   '/login',
-  ah((req, res) => {
+  ah(async (req, res) => {
     const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || '');
     const throttleKey = `${req.ip}|${email}`;
@@ -33,7 +33,7 @@ authRouter.post(
       fail(429, 'Too many attempts. Wait 15 minutes and try again.');
     }
 
-    const user = findUserByEmail(email);
+    const user = await findUserByEmail(email);
     // Same message either way, so the form can't be used to enumerate staff.
     if (!user || !user.active || !verifyPassword(password, user.password_hash)) {
       recordFailedLogin(throttleKey);
@@ -41,9 +41,9 @@ authRouter.post(
     }
 
     clearLoginAttempts(throttleKey);
-    const { token, expires } = createSession(user.id, req.headers['user-agent'] || '');
+    const { token, expires } = await createSession(user.id, req.headers['user-agent'] || '');
     setSessionCookie(res, token, expires);
-    recordLogin(user, req);
+    await recordLogin(user, req);
 
     res.json({ user: publicUser(user) });
   })
@@ -51,8 +51,8 @@ authRouter.post(
 
 authRouter.post(
   '/logout',
-  ah((req, res) => {
-    destroySession(req.sessionToken);
+  ah(async (req, res) => {
+    await destroySession(req.sessionToken);
     clearSessionCookie(res);
     res.json({ ok: true });
   })
@@ -67,7 +67,7 @@ authRouter.get(
 
 authRouter.post(
   '/password',
-  ah((req, res) => {
+  ah(async (req, res) => {
     if (!req.user) fail(401, 'Sign in to continue.');
 
     const current = String(req.body?.currentPassword || '');
@@ -77,15 +77,15 @@ authRouter.post(
     const problem = passwordProblem(next);
     if (problem) fail(400, problem);
 
-    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(
+    await query('UPDATE users SET password_hash = $1, must_change_password = FALSE WHERE id = $2', [
       hashPassword(next),
-      req.user.id
-    );
-    logEvent({ userId: req.user.id, type: 'password_changed' });
+      req.user.id,
+    ]);
+    await logEvent({ userId: req.user.id, type: 'password_changed' });
 
     // Sign every other device out, then re-issue this one.
-    destroyAllSessionsForUser(req.user.id);
-    const { token, expires } = createSession(req.user.id, req.headers['user-agent'] || '');
+    await destroyAllSessionsForUser(req.user.id);
+    const { token, expires } = await createSession(req.user.id, req.headers['user-agent'] || '');
     setSessionCookie(res, token, expires);
 
     res.json({ ok: true });

@@ -18,8 +18,8 @@ const LINE = '#dfe4ee';
  * Gather everything worth putting in front of the next manager: what was
  * missed, what was flagged, every note left on the card, and the timeline.
  */
-export function buildRecap(shiftId) {
-  const detail = shiftDetail(shiftId);
+export async function buildRecap(shiftId) {
+  const detail = await shiftDetail(shiftId);
   if (!detail) return null;
 
   const { shift, sections, events, progress } = detail;

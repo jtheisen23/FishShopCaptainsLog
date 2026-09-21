@@ -76,7 +76,9 @@ function startFakeSmtp() {
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fscl-mail-'));
 const smtp = await startFakeSmtp();
 
-process.env.DB_PATH = path.join(tmpDir, 'mail.db');
+// Honour an externally supplied DATABASE_URL so the same suite can be run
+// against a real Postgres server; otherwise fall back to the embedded one.
+process.env.PGLITE_DIR = path.join(tmpDir, 'pgdata');
 process.env.SMTP_HOST = '127.0.0.1';
 process.env.SMTP_PORT = String(smtp.address().port);
 process.env.SMTP_SECURE = 'false';
@@ -86,20 +88,23 @@ process.env.APP_URL = 'https://log.fishshop.test';
 process.env.NODE_ENV = 'test';
 
 const { app } = await import('../src/server.js');
+const { initDb, closeDb } = await import('../src/db.js');
 const { createUser } = await import('../src/auth.js');
 
 let server;
 let base;
 
 before(async () => {
+  await initDb();
   server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
-  createUser({ email: 'mgr@test.com', name: 'Manny Manager', password: 'password123', role: 'manager' });
+  await createUser({ email: 'mgr@test.com', name: 'Manny Manager', password: 'password123', role: 'manager' });
 });
 
-after(() => {
+after(async () => {
   server?.close();
+  await closeDb();
   smtp.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

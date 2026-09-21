@@ -5,12 +5,17 @@ import path from 'node:path';
 import os from 'node:os';
 
 // Point the app at a throwaway database before anything imports config/db.
+// With no DATABASE_URL set, the app runs its embedded Postgres against this
+// folder — same SQL as production, nothing to install.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fscl-test-'));
-process.env.DB_PATH = path.join(tmpDir, 'test.db');
+// Honour an externally supplied DATABASE_URL so the same suite can be run
+// against a real Postgres server; otherwise fall back to the embedded one.
+process.env.PGLITE_DIR = path.join(tmpDir, 'pgdata');
 process.env.TIMEZONE = 'America/Los_Angeles';
 process.env.NODE_ENV = 'test';
 
 const { app } = await import('../src/server.js');
+const { initDb, closeDb } = await import('../src/db.js');
 const { createUser } = await import('../src/auth.js');
 const { businessDateFor } = await import('../src/shifts.js');
 
@@ -18,17 +23,20 @@ let server;
 let base;
 
 before(async () => {
+  await initDb();
+
   server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 
-  createUser({ email: 'gm@test.com', name: 'Gina GM', password: 'password123', role: 'admin' });
-  createUser({ email: 'mgr@test.com', name: 'Manny Manager', password: 'password123', role: 'manager' });
-  createUser({ email: 'staff@test.com', name: 'Sam Staff', password: 'password123', role: 'staff' });
+  await createUser({ email: 'gm@test.com', name: 'Gina GM', password: 'password123', role: 'admin' });
+  await createUser({ email: 'mgr@test.com', name: 'Manny Manager', password: 'password123', role: 'manager' });
+  await createUser({ email: 'staff@test.com', name: 'Sam Staff', password: 'password123', role: 'staff' });
 });
 
-after(() => {
+after(async () => {
   server?.close();
+  await closeDb();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -69,6 +77,7 @@ test('health endpoint reports the database is reachable', async () => {
   assert.equal(status, 200);
   assert.equal(data.ok, true);
   assert.ok(data.users >= 3);
+  assert.equal(data.database, process.env.DATABASE_URL ? 'postgres' : 'pglite');
 });
 
 test('anonymous callers get no data, and bootstrap reports no user', async () => {
@@ -442,4 +451,73 @@ test('a cross-origin write is refused', async () => {
     body: JSON.stringify({ location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-11' }),
   });
   assert.equal(res.status, 403);
+});
+
+test('two devices opening the same shift at once get one shift, not two', async () => {
+  const opener = await signedIn('mgr@test.com');
+  const closer = await signedIn('gm@test.com');
+  const body = { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-05-01' };
+
+  // The opener's tablet and the closer's phone, racing on the same slot.
+  const [first, second] = await Promise.all([
+    opener('/api/shifts', { method: 'POST', body }),
+    closer('/api/shifts', { method: 'POST', body }),
+  ]);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(first.data.shift.id, second.data.shift.id, 'a duplicate shift was created');
+
+  const { data } = await opener('/api/shifts?location=Point%20Loma&from=2026-05-01&to=2026-05-01');
+  assert.equal(data.shifts.length, 1);
+});
+
+test('simultaneous checks from different phones all land', async () => {
+  const mgr = await signedIn('mgr@test.com');
+  const staff = await signedIn('staff@test.com');
+  const { data: shift } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Pacific Beach', shiftType: 'PM', businessDate: '2026-05-02' },
+  });
+  const id = shift.shift.id;
+
+  const keys = ['open-doors', 'open-patio', 'open-online-ordering', 'open-clock-schedule'];
+  const results = await Promise.all(
+    keys.map((key, index) =>
+      (index % 2 ? staff : mgr)(`/api/shifts/${id}/items/${key}/state`, {
+        method: 'POST',
+        body: { state: 'done' },
+      })
+    )
+  );
+
+  assert.ok(results.every((r) => r.status === 200), 'a concurrent check was rejected');
+
+  const { data } = await mgr(`/api/shifts/${id}`);
+  const done = data.sections.flatMap((s) => s.items).filter((i) => i.state === 'done');
+  assert.equal(done.length, keys.length);
+  assert.equal(data.progress.done, keys.length);
+});
+
+test('two people tapping the same item at once is not an error', async () => {
+  const mgr = await signedIn('mgr@test.com');
+  const staff = await signedIn('staff@test.com');
+  const { data: shift } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-05-03' },
+  });
+  const id = shift.shift.id;
+
+  const results = await Promise.all([
+    mgr(`/api/shifts/${id}/items/peak-log-sales/state`, { method: 'POST', body: { state: 'done' } }),
+    staff(`/api/shifts/${id}/items/peak-log-sales/state`, { method: 'POST', body: { state: 'done' } }),
+  ]);
+
+  assert.ok(results.every((r) => r.status === 200), `expected both to succeed, got ${results.map((r) => r.status)}`);
+
+  const { data } = await mgr(`/api/shifts/${id}`);
+  const item = data.sections.flatMap((s) => s.items).find((i) => i.key === 'peak-log-sales');
+  assert.equal(item.state, 'done');
+  assert.ok(item.checkedBy, 'the item should still carry a stamp');
+  assert.equal(data.progress.done, 1, 'the item should be counted once');
 });

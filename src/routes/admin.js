@@ -4,6 +4,7 @@ import {
   createUser,
   findUserByEmail,
   findUserById,
+  listUsers,
   publicUser,
   hashPassword,
   passwordProblem,
@@ -11,7 +12,7 @@ import {
   normalizeEmail,
   ROLES,
 } from '../auth.js';
-import { db, logEvent, getJsonSetting, setJsonSetting } from '../db.js';
+import { query, logEvent, getJsonSetting, setJsonSetting } from '../db.js';
 import { parseRecipients, verifyMailTransport } from '../mail.js';
 import { ah, fail } from './helpers.js';
 
@@ -23,15 +24,15 @@ adminRouter.use(requireRole('admin'));
 
 adminRouter.get(
   '/users',
-  ah((_req, res) => {
-    const users = db.prepare('SELECT * FROM users ORDER BY active DESC, name COLLATE NOCASE').all();
+  ah(async (_req, res) => {
+    const users = await listUsers();
     res.json({ users: users.map(publicUser) });
   })
 );
 
 adminRouter.post(
   '/users',
-  ah((req, res) => {
+  ah(async (req, res) => {
     const email = normalizeEmail(req.body?.email);
     const name = String(req.body?.name || '').trim();
     const role = String(req.body?.role || 'staff');
@@ -42,24 +43,24 @@ adminRouter.post(
     if (!ROLES.includes(role)) fail(400, 'Pick a valid role.');
     const problem = passwordProblem(password);
     if (problem) fail(400, problem);
-    if (findUserByEmail(email)) fail(409, 'Someone already uses that email.');
+    if (await findUserByEmail(email)) fail(409, 'Someone already uses that email.');
 
-    const user = createUser({ email, name, password, role, mustChangePassword: true });
-    logEvent({ userId: req.user.id, type: 'user_created', detail: `${name} <${email}> as ${role}` });
+    const user = await createUser({ email, name, password, role, mustChangePassword: true });
+    await logEvent({ userId: req.user.id, type: 'user_created', detail: `${name} <${email}> as ${role}` });
     res.status(201).json({ user: publicUser(user) });
   })
 );
 
 adminRouter.patch(
   '/users/:id',
-  ah((req, res) => {
-    const user = findUserById(Number(req.params.id));
+  ah(async (req, res) => {
+    const user = await findUserById(Number(req.params.id));
     if (!user) fail(404, 'No such user.');
 
     const changes = [];
 
     if (typeof req.body?.name === 'string' && req.body.name.trim()) {
-      db.prepare('UPDATE users SET name = ? WHERE id = ?').run(req.body.name.trim(), user.id);
+      await query('UPDATE users SET name = $1 WHERE id = $2', [req.body.name.trim(), user.id]);
       changes.push('name');
     }
 
@@ -68,31 +69,31 @@ adminRouter.patch(
       if (user.id === req.user.id && req.body.role !== 'admin') {
         fail(400, 'You cannot remove your own admin access.');
       }
-      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(req.body.role, user.id);
+      await query('UPDATE users SET role = $1 WHERE id = $2', [req.body.role, user.id]);
       changes.push(`role → ${req.body.role}`);
     }
 
     if (typeof req.body?.active === 'boolean') {
       if (user.id === req.user.id && !req.body.active) fail(400, 'You cannot deactivate yourself.');
-      db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body.active ? 1 : 0, user.id);
-      if (!req.body.active) destroyAllSessionsForUser(user.id);
+      await query('UPDATE users SET active = $1 WHERE id = $2', [Boolean(req.body.active), user.id]);
+      if (!req.body.active) await destroyAllSessionsForUser(user.id);
       changes.push(req.body.active ? 'reactivated' : 'deactivated');
     }
 
     if (typeof req.body?.password === 'string' && req.body.password) {
       const problem = passwordProblem(req.body.password);
       if (problem) fail(400, problem);
-      db.prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?').run(
+      await query('UPDATE users SET password_hash = $1, must_change_password = TRUE WHERE id = $2', [
         hashPassword(req.body.password),
-        user.id
-      );
-      destroyAllSessionsForUser(user.id);
+        user.id,
+      ]);
+      await destroyAllSessionsForUser(user.id);
       changes.push('password reset');
     }
 
     if (!changes.length) fail(400, 'Nothing to update.');
-    logEvent({ userId: req.user.id, type: 'user_updated', detail: `${user.name}: ${changes.join(', ')}` });
-    res.json({ user: publicUser(findUserById(user.id)) });
+    await logEvent({ userId: req.user.id, type: 'user_updated', detail: `${user.name}: ${changes.join(', ')}` });
+    res.json({ user: publicUser(await findUserById(user.id)) });
   })
 );
 
@@ -100,42 +101,43 @@ adminRouter.patch(
 
 adminRouter.get(
   '/settings',
-  ah((_req, res) => {
-    res.json({
-      locations: getJsonSetting('locations', []),
-      shiftTypes: getJsonSetting('shift_types', []),
-      recapRecipients: getJsonSetting('recap_recipients', []),
-    });
+  ah(async (_req, res) => {
+    res.json(await readSettings());
   })
 );
 
+async function readSettings() {
+  const [locations, shiftTypes, recapRecipients] = await Promise.all([
+    getJsonSetting('locations', []),
+    getJsonSetting('shift_types', []),
+    getJsonSetting('recap_recipients', []),
+  ]);
+  return { locations, shiftTypes, recapRecipients };
+}
+
 adminRouter.put(
   '/settings',
-  ah((req, res) => {
+  ah(async (req, res) => {
     if (Array.isArray(req.body?.locations)) {
       const cleaned = [...new Set(req.body.locations.map((v) => String(v).trim()).filter(Boolean))];
       if (!cleaned.length) fail(400, 'Keep at least one location.');
-      setJsonSetting('locations', cleaned);
+      await setJsonSetting('locations', cleaned);
     }
 
     if (Array.isArray(req.body?.shiftTypes)) {
       const cleaned = [...new Set(req.body.shiftTypes.map((v) => String(v).trim()).filter(Boolean))];
       if (!cleaned.length) fail(400, 'Keep at least one shift type.');
-      setJsonSetting('shift_types', cleaned);
+      await setJsonSetting('shift_types', cleaned);
     }
 
     if (req.body?.recapRecipients !== undefined) {
       const { valid, invalid } = parseRecipients(req.body.recapRecipients);
       if (invalid.length) fail(400, `These do not look like email addresses: ${invalid.join(', ')}`);
-      setJsonSetting('recap_recipients', valid);
+      await setJsonSetting('recap_recipients', valid);
     }
 
-    logEvent({ userId: req.user.id, type: 'settings_updated' });
-    res.json({
-      locations: getJsonSetting('locations', []),
-      shiftTypes: getJsonSetting('shift_types', []),
-      recapRecipients: getJsonSetting('recap_recipients', []),
-    });
+    await logEvent({ userId: req.user.id, type: 'settings_updated' });
+    res.json(await readSettings());
   })
 );
 

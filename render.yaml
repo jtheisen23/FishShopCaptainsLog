@@ -1,29 +1,28 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
 #
-# Deploy: Render dashboard → New → Blueprint → pick this repo. Render reads
-# this file and pre-fills everything below; it will prompt you for the values
-# marked `sync: false` (your email credentials and public URL).
+# Deploy: Render dashboard → New → Blueprint → pick this repo.
 #
-# The disk is the part that matters: every shift you log lives in one SQLite
-# file on it. Without a disk, each deploy would start from an empty database.
+# This runs on Render's FREE instance type. There's no disk, because the data
+# lives in a Postgres database elsewhere (Neon and Supabase both have free
+# tiers that don't expire) — you supply its connection string as DATABASE_URL.
+#
+# Two things to know about free hosting, so they don't surprise you mid-shift:
+#   - A free instance sleeps after a stretch with no traffic, and the next
+#     person to open it waits roughly a minute while it wakes.
+#   - Free Postgres providers suspend an idle database too, adding a second
+#     or two on top of that first request.
+# Everything is normal speed once it's awake. See the README if you'd rather
+# pay to remove the wait.
 
 services:
   - type: web
     name: fish-shop-captains-log
     runtime: node
-    # Disks require a paid instance — a free service cannot keep your data.
-    plan: starter
+    plan: free
     region: oregon
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /api/health
-    # SQLite means one writer: do not scale this past a single instance.
-    numInstances: 1
-
-    disk:
-      name: captains-log-data
-      mountPath: /var/data
-      sizeGB: 1
 
     envVars:
       - key: NODE_VERSION
@@ -31,9 +30,12 @@ services:
       - key: NODE_ENV
         value: production
 
-      # Lives on the persistent disk above.
-      - key: DB_PATH
-        value: /var/data/captains-log.db
+      # Your Postgres connection string, e.g. from Neon:
+      #   postgresql://user:password@ep-xxx.us-west-2.aws.neon.tech/dbname?sslmode=require
+      # Everything the restaurant logs lives here, so keep it safe — this one
+      # value is the difference between a working app and an empty one.
+      - key: DATABASE_URL
+        sync: false
 
       # Render terminates HTTPS in front of the app.
       - key: SECURE_COOKIES
@@ -47,13 +49,13 @@ services:
         value: Fish Shop Captain's Log
 
       # Your Render URL, e.g. https://fish-shop-captains-log.onrender.com
-      # Recap emails link back to it. Set it after the first deploy tells you
-      # what the URL is.
+      # Recap emails link back to it. Fill this in after the first deploy tells
+      # you what the URL is.
       - key: APP_URL
         sync: false
 
-      # Email. Leave these blank to deploy without recap emails for now —
-      # everything else works, and you can fill them in later.
+      # Email. Leave blank to deploy without recap emails for now — everything
+      # else works, and you can fill these in whenever you're ready.
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
