@@ -1,0 +1,66 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploy: Render dashboard → New → Blueprint → pick this repo. Render reads
+# this file and pre-fills everything below; it will prompt you for the values
+# marked `sync: false` (your email credentials and public URL).
+#
+# The disk is the part that matters: every shift you log lives in one SQLite
+# file on it. Without a disk, each deploy would start from an empty database.
+
+services:
+  - type: web
+    name: fish-shop-captains-log
+    runtime: node
+    # Disks require a paid instance — a free service cannot keep your data.
+    plan: starter
+    region: oregon
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    # SQLite means one writer: do not scale this past a single instance.
+    numInstances: 1
+
+    disk:
+      name: captains-log-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.2
+      - key: NODE_ENV
+        value: production
+
+      # Lives on the persistent disk above.
+      - key: DB_PATH
+        value: /var/data/captains-log.db
+
+      # Render terminates HTTPS in front of the app.
+      - key: SECURE_COOKIES
+        value: true
+      - key: TRUST_PROXY
+        value: true
+
+      - key: TIMEZONE
+        value: America/Los_Angeles
+      - key: BRAND_NAME
+        value: Fish Shop Captain's Log
+
+      # Your Render URL, e.g. https://fish-shop-captains-log.onrender.com
+      # Recap emails link back to it. Set it after the first deploy tells you
+      # what the URL is.
+      - key: APP_URL
+        sync: false
+
+      # Email. Leave these blank to deploy without recap emails for now —
+      # everything else works, and you can fill them in later.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false

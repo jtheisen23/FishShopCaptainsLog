@@ -11,7 +11,8 @@
     "start": "node --no-warnings src/server.js",
     "dev": "node --no-warnings --watch src/server.js",
     "seed": "node --no-warnings scripts/seed.js",
-    "test": "node --no-warnings --test test/*.test.js"
+    "test": "node --no-warnings --test test/*.test.js",
+    "backup": "node --no-warnings scripts/backup.js"
   },
   "dependencies": {
     "express": "^4.21.2",

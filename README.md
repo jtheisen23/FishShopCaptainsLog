@@ -51,6 +51,9 @@ Sign in as that admin, then add your managers and staff under **Menu → Team &
 settings**. Each person gets a temporary password and is made to choose their
 own the first time they sign in.
 
+That gets it running on one machine. To put it in front of staff on their own
+phones, see [Deploying to Render](#deploying-to-render) below.
+
 ## Configuration
 
 Everything lives in `.env` (see `.env.example` for the annotated list).
@@ -100,20 +103,65 @@ One rule: **never reuse or rename an existing item `key`.** Completed checks are
 stored against those keys, so a rename silently rewrites history. New item, new
 key.
 
-## Deploying
+## Deploying to Render
 
-It's one Node process and one file on disk, so anywhere that runs Node works —
-Render, Railway, Fly.io, a Lightsail box, or a Mac mini in the office.
+The repo carries a [`render.yaml`](render.yaml) blueprint, so most of this is
+click-through.
 
-Two things matter:
+1. **Create the service.** In the Render dashboard: **New → Blueprint**, pick
+   this repository, and let it read `render.yaml`. It will ask you for the
+   values it can't guess — leave the `SMTP_*` and `MAIL_FROM` boxes blank for
+   now if you don't have email credentials yet, and put anything in `APP_URL`;
+   you'll correct it in step 2.
+2. **Set `APP_URL`.** Once the first deploy finishes, Render shows you the
+   service's URL (something like `https://fish-shop-captains-log.onrender.com`).
+   Put that in the `APP_URL` environment variable and save — recap emails link
+   back to it, so it needs to be right.
+3. **Create your first login.** Open the **Shell** tab on the service and run:
 
-1. **`DB_PATH` must point at a persistent volume.** On a platform with an
-   ephemeral filesystem, every deploy wipes your shift history otherwise.
-2. **Serve it over HTTPS** with `SECURE_COOKIES=true` — staff are typing
-   passwords into it over restaurant wifi.
+   ```bash
+   npm run seed
+   ```
 
-Back up the database by copying the file (SQLite's `.backup` command is the
-safe way to do it while the app is running).
+   It asks for an email, name and password. That account is an admin; everyone
+   else you add from inside the app under **Team & settings**.
+4. **Sign in** at your Render URL and add your managers and staff.
+5. **Add email when you're ready** by filling in `SMTP_HOST`, `SMTP_PORT`,
+   `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM`. After it restarts, use **Test the
+   email connection** in Settings to confirm it before a manager relies on it.
+
+### Two things not to change
+
+- **Keep it on one instance.** Every shift lives in a single SQLite file, which
+  allows one writer. Scaling to two instances would corrupt data, so the
+  blueprint pins `numInstances: 1`.
+- **Keep the disk.** `DB_PATH` points at `/var/data` on the attached disk. A
+  free Render instance can't have a disk, which is why the blueprint asks for a
+  paid one — on a diskless service, every deploy would silently start you over
+  with an empty database.
+
+### Backups
+
+The whole system is one file. From the Render shell:
+
+```bash
+npm run backup                     # → /var/backups/captains-log-YYYY-MM-DD.db
+npm run backup /var/data/copy.db   # or a path you choose
+```
+
+This uses SQLite's online-backup, which is the safe way to copy a database the
+app is still writing to — a plain `cp` can catch it mid-write and produce a file
+that won't open. Write the copy somewhere on the disk, download it, or add a
+Render cron job to push it off-box.
+
+To restore, stop the service, replace the file at `DB_PATH` with your backup,
+and start it again.
+
+### Hosting it somewhere else
+
+Nothing here is Render-specific beyond `render.yaml`. Any host that runs Node
+works — Railway, Fly.io, or a machine in the office. The same two rules apply:
+`DB_PATH` on storage that survives restarts, and one instance only.
 
 ## Tests
 
