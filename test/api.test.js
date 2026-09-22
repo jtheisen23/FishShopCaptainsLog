@@ -521,3 +521,61 @@ test('two people tapping the same item at once is not an error', async () => {
   assert.ok(item.checkedBy, 'the item should still carry a stamp');
   assert.equal(data.progress.done, 1, 'the item should be counted once');
 });
+
+test('one person can be signed in on several devices at once', async () => {
+  const phone = await signedIn('gm@test.com');
+  const laptop = await signedIn('gm@test.com');
+  const tablet = await signedIn('gm@test.com');
+
+  for (const [name, device] of [['phone', phone], ['laptop', laptop], ['tablet', tablet]]) {
+    const { data } = await device('/api/bootstrap');
+    assert.equal(data.user?.email, 'gm@test.com', `${name} should be signed in`);
+  }
+
+  // Signing out on one device must not touch the others.
+  await phone('/api/auth/logout', { method: 'POST' });
+  assert.equal((await phone('/api/bootstrap')).data.user, null, 'phone should be signed out');
+  assert.ok((await laptop('/api/bootstrap')).data.user, 'laptop should still be signed in');
+  assert.ok((await tablet('/api/bootstrap')).data.user, 'tablet should still be signed in');
+});
+
+test('changing a password signs out the other devices, and only them', async () => {
+  await createUser({ email: 'multi@test.com', name: 'Multi Device', password: 'password123', role: 'manager' });
+
+  const phone = await signedIn('multi@test.com');
+  const laptop = await signedIn('multi@test.com');
+
+  const changed = await phone('/api/auth/password', {
+    method: 'POST',
+    body: { currentPassword: 'password123', newPassword: 'brand-new-password' },
+  });
+  assert.equal(changed.status, 200);
+
+  // The device that made the change stays usable...
+  assert.ok((await phone('/api/bootstrap')).data.user, 'the device that changed it should stay signed in');
+  // ...every other one is signed out.
+  assert.equal((await laptop('/api/bootstrap')).data.user, null, 'other devices should be signed out');
+
+  // And the laptop can simply sign in again with the new password.
+  const laptopAgain = await signedIn('multi@test.com', 'brand-new-password');
+  assert.ok((await laptopAgain('/api/bootstrap')).data.user);
+});
+
+test('two devices see each other\'s work on the same shift', async () => {
+  const tablet = await signedIn('mgr@test.com');
+  const phone = await signedIn('mgr@test.com');
+
+  const { data: opened } = await tablet('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-06-01' },
+  });
+  const id = opened.shift.id;
+
+  await tablet(`/api/shifts/${id}/items/open-doors/state`, { method: 'POST', body: { state: 'done' } });
+
+  // The phone, which never touched that item, sees it already checked.
+  const { data } = await phone(`/api/shifts/${id}`);
+  const item = data.sections.flatMap((s) => s.items).find((i) => i.key === 'open-doors');
+  assert.equal(item.state, 'done');
+  assert.equal(item.checkedBy, 'Manny Manager');
+});
