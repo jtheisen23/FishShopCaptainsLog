@@ -68,6 +68,7 @@ Everything lives in `.env` (see `.env.example` for the annotated list).
 | `TRUST_PROXY` | `true` behind a load balancer or reverse proxy. |
 | `SMTP_*`, `MAIL_FROM` | Outbound email for recaps. |
 | `SEED_ADMIN_*` | Creates the first admin at startup when the database has no accounts. For hosts without free shell access. |
+| `SEED_ADMIN_RESET` | `true` resets that admin's password instead of creating an account — the way back in if you're locked out. Clear it afterwards. |
 
 Locations, shift types (AM/PM/Mid/…) and the default recap recipients are
 edited in the app under **Team & settings → Shop**, not in `.env`.
@@ -186,6 +187,18 @@ click-through.
    fires when there are no accounts at all, so it can't overwrite anyone.
    **Remove `SEED_ADMIN_PASSWORD` once you've signed in** — no reason to leave
    a password in a dashboard.
+
+### Locked out?
+
+If you lose the admin password and have no other admin to reset it for you, add
+`SEED_ADMIN_RESET=true` alongside `SEED_ADMIN_EMAIL` and a new
+`SEED_ADMIN_PASSWORD`, and save. On restart that account's password becomes the
+one you set, its admin access is restored, and every existing session for it is
+signed out. Remove all three variables afterwards.
+
+This is no weaker than the deployment already is — anyone who can edit these
+variables could already repoint the app at a different database — but it is
+worth clearing once you're back in.
 5. Sign in at your Render URL and add your team.
 6. Fill in the `SMTP_*` values whenever you're ready for emailed recaps, then
    use **Test the email connection** in Settings.

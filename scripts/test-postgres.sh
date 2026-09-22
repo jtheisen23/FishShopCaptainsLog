@@ -15,7 +15,10 @@ BASE="${ADMIN_URL%/*}"
 fail=0
 for file in test/*.test.js; do
   # One database per file: they'd otherwise collide on unique constraints.
-  name="fscl_$(basename "$file" .test.js)"
+  # Anything but letters, digits and underscores needs quoting in an
+  # identifier, so flatten it rather than quoting everywhere.
+  safe="$(printf '%s' "$(basename "$file" .test.js)" | tr -c '[:alnum:]_' '_')"
+  name="fscl_${safe}"
   psql "$ADMIN_URL" -q -c "DROP DATABASE IF EXISTS $name;" -c "CREATE DATABASE $name;"
 
   echo "── $file → $name"
