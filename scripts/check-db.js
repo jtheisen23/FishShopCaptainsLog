@@ -81,6 +81,17 @@ if (/^\[.*\]$/.test(info.rawPassword || '')) {
   process.exit(1);
 }
 
+// Supabase's poolers want the project-scoped username, "postgres.<project-ref>".
+// Using the bare "postgres" from the direct-connection string fails with a
+// plain "password authentication failed", which sends you resetting a password
+// that was never wrong.
+if (/pooler\.supabase\.com$/i.test(info.host) && !info.user.includes('.')) {
+  console.error(`The username "${info.user}" looks wrong for a Supabase pooler.`);
+  console.error('Pooler connections use "postgres.<your-project-ref>", not plain "postgres".');
+  console.error('Copy the Session pooler string fresh from Supabase rather than editing the direct one.\n');
+  process.exitCode = 1;
+}
+
 const { default: pg } = await import('pg');
 const client = new pg.Client({
   connectionString: config.databaseUrl,
@@ -126,6 +137,9 @@ try {
     console.error('Nothing is listening there. Check the host and port.');
   } else if (/password|authentication|SASL/i.test(message)) {
     console.error('The server rejected the username or password.');
+    if (/pooler\.supabase\.com$/i.test(info.host) && !info.user.includes('.')) {
+      console.error('Most likely the username: a pooler needs "postgres.<project-ref>".');
+    }
     console.error('If your password contains @ : / or #, percent-encode it (@ becomes %40),');
     console.error('or reset the database password in your provider\'s dashboard.');
   } else if (/self.signed|certificate|SSL|TLS/i.test(message)) {
