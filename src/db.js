@@ -306,8 +306,9 @@ async function migrate() {
 
 const DEFAULT_SETTINGS = {
   locations: JSON.stringify(['Point Loma', 'Pacific Beach']),
-  shift_types: JSON.stringify(['AM', 'PM']),
   recap_recipients: JSON.stringify([]),
+  // Served from public/. Change it under Team & settings → Shop.
+  brand_logo_url: '/logo.png',
 };
 
 async function seedDefaultSettings() {
