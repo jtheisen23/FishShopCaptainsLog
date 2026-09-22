@@ -25,8 +25,11 @@ services:
     healthCheckPath: /api/health
 
     envVars:
+      # Major version only: pinning an exact patch fails the build outright if
+      # the host doesn't offer that specific release.
       - key: NODE_VERSION
-        value: 22.22.2
+        value: "22"
+
       - key: NODE_ENV
         value: production
 

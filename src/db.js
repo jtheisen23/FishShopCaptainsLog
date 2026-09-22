@@ -46,6 +46,16 @@ export async function initDb() {
     pool.on('error', (error) => console.error('[postgres pool]', error.message));
     driver = 'postgres';
   } else {
+    // Falling back to the embedded database in production would "work" while
+    // silently writing every shift to a disk the host wipes on redeploy.
+    // Refuse instead: a deploy that fails loudly beats data that vanishes.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'DATABASE_URL is not set. Production needs a Postgres connection string — ' +
+          'without one the app would store shifts locally and lose them on the next deploy. ' +
+          'Set DATABASE_URL, then redeploy. Run `npm run check-db` to test a connection string.'
+      );
+    }
     const { PGlite } = await import('@electric-sql/pglite');
     fs.mkdirSync(path.dirname(config.pgliteDir), { recursive: true });
     pglite = await PGlite.create(config.pgliteDir);
