@@ -249,9 +249,10 @@ npm test                      # embedded Postgres; no setup, no server needed
 scripts/test-postgres.sh      # the same suite against a real Postgres server
 ```
 
-30 tests covering the API, roles and permissions, the closed-shift rule, recap
-contents and HTML escaping, concurrent edits from two devices, and real SMTP
-delivery against a fake mail server.
+41 tests covering the API, roles and permissions, the closed-shift rule, recap
+contents and HTML escaping, concurrent edits from two devices, multi-device
+sign-in, the admin bootstrap and recovery paths, and real SMTP delivery against
+a fake mail server.
 
 The second command is the one that proves the production path — the network
 driver, connection pooling and transactions — rather than the embedded engine.
