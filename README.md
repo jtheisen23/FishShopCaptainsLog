@@ -67,6 +67,7 @@ Everything lives in `.env` (see `.env.example` for the annotated list).
 | `SECURE_COOKIES` | Leave `true` when serving over HTTPS. |
 | `TRUST_PROXY` | `true` behind a load balancer or reverse proxy. |
 | `SMTP_*`, `MAIL_FROM` | Outbound email for recaps. |
+| `SEED_ADMIN_*` | Creates the first admin at startup when the database has no accounts. For hosts without free shell access. |
 
 Locations, shift types (AM/PM/Mid/…) and the default recap recipients are
 edited in the app under **Team & settings → Shop**, not in `.env`.
@@ -170,9 +171,21 @@ click-through.
    and `MAIL_FROM` boxes blank if you don't have email credentials yet.
 3. When the first deploy finishes, Render shows the service's URL. Put that
    into `APP_URL` and save — recap emails link back to it.
-4. Open the **Shell** tab and run `npm run seed` to create your admin login.
-   (If the deploy failed, run `npm run check-db` there first — it will usually
-   say exactly what's wrong with the connection string.)
+4. Create your admin login. If your plan includes shell access, open the
+   **Shell** tab and run `npm run seed`. Otherwise do it with environment
+   variables — add these three, save, and the app creates the account as it
+   restarts:
+
+   ```
+   SEED_ADMIN_EMAIL=you@fishshop.com
+   SEED_ADMIN_NAME=Your Name
+   SEED_ADMIN_PASSWORD=pick-a-good-one
+   ```
+
+   The deploy log will confirm: `Created the first admin account: …`. It only
+   fires when there are no accounts at all, so it can't overwrite anyone.
+   **Remove `SEED_ADMIN_PASSWORD` once you've signed in** — no reason to leave
+   a password in a dashboard.
 5. Sign in at your Render URL and add your team.
 6. Fill in the `SMTP_*` values whenever you're ready for emailed recaps, then
    use **Test the email connection** in Settings.

@@ -3,6 +3,7 @@ import express from 'express';
 import { config, ROOT, smtpConfigured } from './config.js';
 import { initDb, closeDb, driver } from './db.js';
 import { attachUser, purgeExpiredSessions, countUsers } from './auth.js';
+import { maybeSeedFirstAdmin } from './first-run.js';
 import { cookieParser, sameOriginOnly } from './routes/helpers.js';
 import { authRouter } from './routes/auth.js';
 import { shiftsRouter } from './routes/shifts.js';
@@ -60,6 +61,7 @@ app.use((error, req, res, _next) => {
 
 export async function start() {
   await initDb();
+  await maybeSeedFirstAdmin();
 
   await purgeExpiredSessions();
   setInterval(() => {
