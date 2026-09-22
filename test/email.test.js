@@ -153,13 +153,13 @@ test('closing a shift emails the recap to the chosen recipients', async () => {
 
   const { data: opened } = await call('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-04-01' },
+    body: { location: 'Point Loma', templateKey: 'closing', businessDate: '2026-04-01' },
   });
   const id = opened.shift.id;
 
-  await call(`/api/shifts/${id}/items/open-doors/state`, { method: 'POST', body: { state: 'done' } });
-  await call(`/api/shifts/${id}/items/postpeak-till-audit/flag`, { method: 'POST', body: { flagged: true } });
-  await call(`/api/shifts/${id}/items/postpeak-till-audit/note`, {
+  await call(`/api/shifts/${id}/items/close-doors-locked/state`, { method: 'POST', body: { state: 'done' } });
+  await call(`/api/shifts/${id}/items/close-postpeak-till-audit/flag`, { method: 'POST', body: { flagged: true } });
+  await call(`/api/shifts/${id}/items/close-postpeak-till-audit/note`, {
     method: 'POST',
     body: { note: 'Drawer 3 short $22 — Marcus counting again at 10.' },
   });
@@ -184,7 +184,7 @@ test('closing a shift emails the recap to the chosen recipients', async () => {
   const mail = received[0];
   assert.deepEqual(mail.to.sort(), ['gm@fishshop.test', 'owner@fishshop.test']);
   assert.match(mail.from, /no-reply@fishshop\.test/);
-  assert.match(decodeHeader(mail.message), /Subject: Point Loma · PM shift recap · Wednesday, April 1, 2026/);
+  assert.match(decodeHeader(mail.message), /Subject: Point Loma · Closing shift recap · Wednesday, April 1, 2026/);
   assert.match(mail.message, /multipart\/alternative/, 'should carry both a text and an HTML part');
 
   // Quoted-printable encodes the body, so decode the soft line breaks first.
@@ -207,7 +207,7 @@ test('a recap can be re-sent to different recipients later', async () => {
 
   const { data: opened } = await call('/api/shifts', {
     method: 'POST',
-    body: { location: 'Pacific Beach', shiftType: 'AM', businessDate: '2026-04-02' },
+    body: { location: 'Pacific Beach', templateKey: 'opening', businessDate: '2026-04-02' },
   });
 
   const before = received.length;
@@ -227,7 +227,7 @@ test('invalid addresses are rejected before anything is sent', async () => {
 
   const { data: opened } = await call('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-04-03' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-04-03' },
   });
 
   const before = received.length;

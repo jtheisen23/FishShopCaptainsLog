@@ -110,6 +110,7 @@ async function route() {
   const shiftMatch = path.match(/^\/shift\/(\d+)$/);
   if (shiftMatch) return renderShift(Number(shiftMatch[1]));
   if (path === '/history') return renderHistory();
+  if (path === '/deck-walk') return renderDeckWalk();
   if (path === '/settings') return renderSettings();
   return renderHome();
 }
@@ -221,6 +222,7 @@ function wireMenu(root) {
        <div class="stack">
          <a class="btn secondary block" data-link href="/">Today's shift</a>
          <a class="btn secondary block" data-link href="/history">Shift history</a>
+         <a class="btn secondary block" data-link href="/deck-walk">Deck Walk guide</a>
          ${user.role === 'admin' ? `<a class="btn secondary block" data-link href="/settings">Team &amp; settings</a>` : ''}
          <button class="btn secondary block" data-password>Change password</button>
          <button class="btn danger block" data-logout>Sign out</button>
@@ -389,11 +391,11 @@ function passwordSheet() {
 /* -------------------------------- home ------------------------------- */
 
 function renderHome() {
-  const { user, locations, shiftTypes, today, brandName } = state.boot;
+  const { user, locations, logs, today, brandName } = state.boot;
   const savedLocation = localStorage.getItem('fscl.location');
   const location = locations.includes(savedLocation) ? savedLocation : locations[0];
-  const savedShift = localStorage.getItem('fscl.shiftType');
-  const shiftType = shiftTypes.includes(savedShift) ? savedShift : shiftTypes[0];
+  const savedLog = localStorage.getItem('fscl.log');
+  const logKey = logs.some((l) => l.key === savedLog) ? savedLog : logs[0].key;
 
   appEl.innerHTML = `
     ${appbar({ title: brandName, sub: `Signed in as ${user.name}`, actions: menuButton })}
@@ -408,10 +410,11 @@ function renderHome() {
               </select>
             </div>
             <div class="field">
-              <label>Shift</label>
+              <label>Which log</label>
               <div class="segmented" id="shift-seg">
-                ${shiftTypes.map((s) => `<button type="button" data-shift="${esc(s)}" aria-pressed="${s === shiftType}">${esc(s)}</button>`).join('')}
+                ${logs.map((l) => `<button type="button" data-log="${esc(l.key)}" aria-pressed="${l.key === logKey}">${esc(l.name)}</button>`).join('')}
               </div>
+              <span class="tiny muted" id="log-blurb">${esc(logs.find((l) => l.key === logKey)?.blurb || '')}</span>
             </div>
             <div class="field">
               <label for="bdate">Business date</label>
@@ -428,13 +431,15 @@ function renderHome() {
 
   wireMenu(appEl);
 
-  let chosenShift = shiftType;
+  let chosenLog = logKey;
   const seg = document.getElementById('shift-seg');
   seg.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-shift]');
+    const button = event.target.closest('[data-log]');
     if (!button) return;
-    chosenShift = button.dataset.shift;
+    chosenLog = button.dataset.log;
     for (const b of seg.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === button));
+    const blurb = document.getElementById('log-blurb');
+    if (blurb) blurb.textContent = logs.find((l) => l.key === chosenLog)?.blurb || '';
   });
 
   document.getElementById('start').addEventListener('click', async (event) => {
@@ -444,12 +449,12 @@ function renderHome() {
     const businessDate = document.getElementById('bdate').value || today;
 
     localStorage.setItem('fscl.location', loc);
-    localStorage.setItem('fscl.shiftType', chosenShift);
+    localStorage.setItem('fscl.log', chosenLog);
 
     try {
       const detail = await api('/shifts', {
         method: 'POST',
-        body: { location: loc, shiftType: chosenShift, businessDate },
+        body: { location: loc, templateKey: chosenLog, businessDate },
       });
       state.detail = detail;
       navigate(`/shift/${detail.shift.id}`);
@@ -617,12 +622,16 @@ function phaseHtml(section) {
 
 function itemHtml(item) {
   return `
-    <div class="item${item.flagged ? ' is-flagged' : ''}" data-item="${esc(item.key)}" data-state="${item.state}">
+    <div class="item${item.flagged ? ' is-flagged' : ''}${item.deckWalk ? ' is-deckwalk' : ''}"
+         data-item="${esc(item.key)}" data-state="${item.state}">
       <button class="tick" data-tick aria-label="Toggle ${esc(item.label)}" aria-pressed="${item.state === 'done'}">
         ${item.state === 'na' ? DASH_SVG : CHECK_SVG}
       </button>
       <div class="item-main">
-        <span class="item-label" data-tick>${esc(item.label)}</span>
+        <span class="item-label" data-tick>
+          ${item.deckWalk ? `<span class="dw-badge">${item.deckWalk}</span>` : ''}${esc(item.label)}
+        </span>
+        ${item.deckWalk ? `<a class="dw-link" data-link href="/deck-walk">See the route →</a>` : ''}
         <div class="stamp">${item.checkedBy ? `
             <span class="who">${esc(item.checkedBy)}</span>
             <span>·</span>
@@ -1272,6 +1281,133 @@ async function renderShopTab(host) {
     button.disabled = false;
     button.textContent = 'Test the email connection';
   });
+}
+
+
+/* ---------------------------- deck walk guide ------------------------- */
+
+/**
+ * The route, drawn as the figure eight it is: two loops meeting at the Pass,
+ * back of house first. Positions are placed around two ellipses so the diagram
+ * reads the same way as the printed card.
+ */
+function routeDiagram(stations) {
+  const LEFT = { cx: 108, cy: 85, rx: 72, ry: 50 };
+  const RIGHT = { cx: 252, cy: 85, rx: 72, ry: 50 };
+  const at = (loop, degrees) => ({
+    x: loop.cx + loop.rx * Math.cos((degrees * Math.PI) / 180),
+    y: loop.cy - loop.ry * Math.sin((degrees * Math.PI) / 180),
+  });
+
+  // Walk order runs 1→5 around the back loop, then 6→10 around the front.
+  // The inner four sit clear of the Pass so nothing collides with it.
+  const placements = {
+    1: at(LEFT, -55), 2: at(LEFT, -140), 3: at(LEFT, 180), 4: at(LEFT, 140), 5: at(LEFT, 55),
+    6: at(RIGHT, -125), 7: at(RIGHT, -40), 8: at(RIGHT, 0), 9: at(RIGHT, 40), 10: at(RIGHT, 125),
+  };
+
+  const node = (stop) => {
+    const p = placements[Number(stop)];
+    const station = stations.find((s) => s.stop === stop);
+    return `
+      <g>
+        <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="13"
+                fill="var(--card)" stroke="var(--navy)" stroke-width="2.5"></circle>
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 4.5).toFixed(1)}" text-anchor="middle"
+              font-size="12" font-weight="700" fill="var(--navy)">${esc(stop)}</text>
+        <title>${esc(station ? station.name : stop)}</title>
+      </g>`;
+  };
+
+  return `
+    <svg viewBox="0 0 360 170" class="route-svg" role="img"
+         aria-label="The route: two loops crossing at the Pass. Back of house stops 1 to 5, then front of house stops 6 to 10.">
+      <ellipse cx="${LEFT.cx}" cy="${LEFT.cy}" rx="${LEFT.rx}" ry="${LEFT.ry}"
+               fill="none" stroke="var(--navy)" stroke-width="2" opacity=".45"></ellipse>
+      <ellipse cx="${RIGHT.cx}" cy="${RIGHT.cy}" rx="${RIGHT.rx}" ry="${RIGHT.ry}"
+               fill="none" stroke="var(--navy)" stroke-width="2" opacity=".45"></ellipse>
+      ${Object.keys(placements).map((stop) => node(stop)).join('')}
+      <g>
+        <circle cx="180" cy="85" r="19" fill="var(--navy)"></circle>
+        <text x="180" y="89.5" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">PASS</text>
+        <title>The Pass — start and finish</title>
+      </g>
+    </svg>`;
+}
+
+function stationCard(station) {
+  return `
+    <section class="station">
+      <header class="station-head">
+        <span class="station-stop${station.stop === 'P' ? ' is-pass' : ''}">${esc(station.stop)}</span>
+        <span class="grow">
+          <span class="station-name">${esc(station.name)}</span>
+          ${station.note ? `<span class="station-note">${esc(station.note)}</span>` : ''}
+        </span>
+      </header>
+      <ul class="station-checks">
+        ${station.checks.map((check) => `<li>${esc(check)}</li>`).join('')}
+      </ul>
+    </section>`;
+}
+
+async function renderDeckWalk() {
+  appEl.innerHTML = `${appbar({ title: 'Deck Walk', sub: 'The route, every time', back: '/', actions: menuButton })}
+    <main class="page"><div class="boot">Loading…</div></main>`;
+  wireMenu(appEl);
+
+  let guide;
+  try {
+    guide = await api('/deck-walk');
+  } catch (error) {
+    appEl.querySelector('.page').innerHTML = `<div class="card"><div class="empty">${esc(error.message)}</div></div>`;
+    return;
+  }
+
+  const { rules, loops, stations } = guide;
+  const pass = stations.find((s) => s.stop === 'P');
+  const byLoop = (key) => stations.filter((s) => s.loop === key);
+
+  appEl.innerHTML = `
+    ${appbar({ title: 'Deck Walk', sub: 'The route, every time', back: '/', actions: menuButton })}
+    <main class="page">
+      <div class="card card-pad">
+        <div class="route-title">The Route</div>
+        ${routeDiagram(stations)}
+        <p class="small muted center" style="margin:10px 0 0;">${esc(rules.route)}</p>
+        <div class="loop-legend">
+          ${loops.map((loop) => `
+            <div class="loop">
+              <span class="loop-number">${loop.number}</span>
+              <span>
+                <strong>${esc(loop.name)}</strong>
+                <span class="tiny muted" style="display:block;">${esc(loop.stops)}</span>
+              </span>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="card card-pad rules">
+        <div class="rules-headline">${esc(rules.headline)}</div>
+        ${rules.lines.map((line) => `<div class="rules-line">${esc(line)}</div>`).join('')}
+        <div class="rules-cadence">${esc(rules.cadence)}</div>
+      </div>
+
+      <div class="section-title">Start &amp; finish</div>
+      <div class="stack">${stationCard(pass)}</div>
+
+      <div class="section-title">Loop 1 · Back of House</div>
+      <div class="stack">${byLoop('boh').map(stationCard).join('')}</div>
+
+      <div class="section-title">Loop 2 · Front of House</div>
+      <div class="stack">${byLoop('foh').map(stationCard).join('')}</div>
+
+      <p class="small muted center" style="padding:16px 8px 0;">
+        Finish back at the Pass, where you started.
+      </p>
+    </main>`;
+
+  wireMenu(appEl);
 }
 
 /* -------------------------------- start ------------------------------- */

@@ -247,6 +247,7 @@ async function migrate() {
       location TEXT NOT NULL,
       business_date TEXT NOT NULL,
       shift_type TEXT NOT NULL,
+      template_key TEXT NOT NULL DEFAULT 'opening',
       template_version INTEGER NOT NULL,
       status TEXT NOT NULL DEFAULT 'open',
       opened_by INTEGER REFERENCES users(id),
@@ -258,6 +259,8 @@ async function migrate() {
       UNIQUE(location, business_date, shift_type)
     )`);
   await query('CREATE INDEX IF NOT EXISTS idx_shifts_date ON shifts(business_date DESC, location)');
+  // Added after the first release; existing rows are all opening logs.
+  await query("ALTER TABLE shifts ADD COLUMN IF NOT EXISTS template_key TEXT NOT NULL DEFAULT 'opening'");
 
   await query(`
     CREATE TABLE IF NOT EXISTS checks (

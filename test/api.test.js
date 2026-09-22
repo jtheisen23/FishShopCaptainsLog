@@ -119,8 +119,10 @@ test('bootstrap describes the shop, and hides recap recipients from staff', asyn
   const gm = await signedIn('gm@test.com');
   const { data } = await gm('/api/bootstrap');
   assert.equal(data.user.name, 'Gina GM');
-  assert.equal(data.template.totalItems, 33);
-  assert.equal(data.template.sections.length, 7);
+  assert.equal(data.logs.length, 2, 'there are two cards: opening and closing');
+  assert.deepEqual(data.logs.map((l) => l.key), ['opening', 'closing']);
+  assert.equal(data.logs[0].totalItems, 37);
+  assert.equal(data.defaultLog, 'opening');
   assert.ok(data.locations.includes('Point Loma'));
   assert.equal(data.today, businessDateFor());
 
@@ -131,24 +133,29 @@ test('bootstrap describes the shop, and hides recap recipients from staff', asyn
 
 test('opening the same slot twice returns the same shift', async () => {
   const mgr = await signedIn('mgr@test.com');
-  const body = { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-01' };
+  const body = { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-01' };
   const first = await mgr('/api/shifts', { method: 'POST', body });
   const second = await mgr('/api/shifts', { method: 'POST', body });
   assert.equal(first.status, 200);
   assert.equal(first.data.shift.id, second.data.shift.id);
   assert.equal(first.data.progress.done, 0);
-  assert.equal(first.data.progress.total, 33);
+  assert.equal(first.data.progress.total, 37);
 });
 
 test('an invalid location or shift type is refused', async () => {
   const mgr = await signedIn('mgr@test.com');
   const badLocation = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Atlantis', shiftType: 'AM', businessDate: '2026-03-01' },
+    body: { location: 'Atlantis', templateKey: 'opening', businessDate: '2026-03-01' },
   });
+  const badLog = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'brunch', businessDate: '2026-03-01' },
+  });
+  assert.equal(badLog.status, 400);
   const badDate = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: 'tomorrow' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: 'tomorrow' },
   });
   assert.equal(badLocation.status, 400);
   assert.equal(badDate.status, 400);
@@ -158,7 +165,7 @@ test('checking an item stamps who and when, and lands in the running log', async
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await staff('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-03-02' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-02' },
   });
 
   const { data } = await staff(`/api/shifts/${shift.shift.id}/items/open-doors/state`, {
@@ -180,7 +187,7 @@ test('unchecking clears the stamp', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await staff('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-03-02' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-02' },
   });
   const id = shift.shift.id;
 
@@ -200,7 +207,7 @@ test('notes and flags attach to an item and survive a reload', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await staff('/api/shifts', {
     method: 'POST',
-    body: { location: 'Pacific Beach', shiftType: 'AM', businessDate: '2026-03-03' },
+    body: { location: 'Pacific Beach', templateKey: 'opening', businessDate: '2026-03-03' },
   });
   const id = shift.shift.id;
 
@@ -221,7 +228,7 @@ test('an unknown checklist item is rejected', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await staff('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-04' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-04' },
   });
   const res = await staff(`/api/shifts/${shift.shift.id}/items/not-a-real-item/state`, {
     method: 'POST',
@@ -235,7 +242,7 @@ test('staff cannot close a shift; a manager can', async () => {
   const mgr = await signedIn('mgr@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-05' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-05' },
   });
   const id = shift.shift.id;
 
@@ -254,7 +261,7 @@ test('a closed shift is read-only until a manager reopens it', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-03-06' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-06' },
   });
   const id = shift.shift.id;
 
@@ -280,25 +287,25 @@ test('the recap lists what was missed, flagged and noted', async () => {
   const mgr = await signedIn('mgr@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Pacific Beach', shiftType: 'PM', businessDate: '2026-03-07' },
+    body: { location: 'Pacific Beach', templateKey: 'closing', businessDate: '2026-03-07' },
   });
   const id = shift.shift.id;
 
-  await mgr(`/api/shifts/${id}/items/admin-safe-count/state`, { method: 'POST', body: { state: 'done' } });
-  await mgr(`/api/shifts/${id}/items/admin-bank-run/state`, { method: 'POST', body: { state: 'na' } });
-  await mgr(`/api/shifts/${id}/items/postpeak-till-audit/flag`, { method: 'POST', body: { flagged: true } });
-  await mgr(`/api/shifts/${id}/items/postpeak-till-audit/note`, {
+  await mgr(`/api/shifts/${id}/items/close-admin-tills-safe/state`, { method: 'POST', body: { state: 'done' } });
+  await mgr(`/api/shifts/${id}/items/close-admin-deposit-logs/state`, { method: 'POST', body: { state: 'na' } });
+  await mgr(`/api/shifts/${id}/items/close-postpeak-till-audit/flag`, { method: 'POST', body: { flagged: true } });
+  await mgr(`/api/shifts/${id}/items/close-postpeak-till-audit/note`, {
     method: 'POST',
     body: { note: 'Drawer 3 short $22.' },
   });
   await mgr(`/api/shifts/${id}/log`, { method: 'POST', body: { text: 'Lost power for 6 minutes at 7pm.' } });
 
   const { data: text } = await mgr(`/api/shifts/${id}/recap.txt`);
-  assert.match(text, /Pacific Beach · PM shift recap/);
+  assert.match(text, /Pacific Beach · Closing shift recap/);
   assert.match(text, /NEEDS ATTENTION \(1\)/);
   assert.match(text, /Drawer 3 short \$22\./);
   assert.match(text, /MARKED N\/A \(1\)/);
-  assert.match(text, /NOT COMPLETED \(31\)/);
+  assert.match(text, /NOT COMPLETED \(35\)/);
   assert.match(text, /Lost power for 6 minutes at 7pm\./);
 
   const { status, data: html } = await mgr(`/api/shifts/${id}/recap.html`);
@@ -311,7 +318,7 @@ test('recap HTML escapes user-supplied text', async () => {
   const mgr = await signedIn('mgr@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-08' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-08' },
   });
   const id = shift.shift.id;
 
@@ -329,7 +336,7 @@ test('emailing a recap fails cleanly when SMTP is not configured', async () => {
   const mgr = await signedIn('mgr@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-09' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-09' },
   });
   const res = await mgr(`/api/shifts/${shift.shift.id}/recap/email`, {
     method: 'POST',
@@ -343,7 +350,7 @@ test('a recap with no recipients is refused before any send is attempted', async
   const mgr = await signedIn('mgr@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-03-10' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-10' },
   });
   const res = await mgr(`/api/shifts/${shift.shift.id}/recap/email`, {
     method: 'POST',
@@ -448,7 +455,7 @@ test('a cross-origin write is refused', async () => {
   const res = await fetch(`${base}/api/shifts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example.com' },
-    body: JSON.stringify({ location: 'Point Loma', shiftType: 'AM', businessDate: '2026-03-11' }),
+    body: JSON.stringify({ location: 'Point Loma', templateKey: 'opening', businessDate: '2026-03-11' }),
   });
   assert.equal(res.status, 403);
 });
@@ -456,7 +463,7 @@ test('a cross-origin write is refused', async () => {
 test('two devices opening the same shift at once get one shift, not two', async () => {
   const opener = await signedIn('mgr@test.com');
   const closer = await signedIn('gm@test.com');
-  const body = { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-05-01' };
+  const body = { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-05-01' };
 
   // The opener's tablet and the closer's phone, racing on the same slot.
   const [first, second] = await Promise.all([
@@ -477,7 +484,7 @@ test('simultaneous checks from different phones all land', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Pacific Beach', shiftType: 'PM', businessDate: '2026-05-02' },
+    body: { location: 'Pacific Beach', templateKey: 'opening', businessDate: '2026-05-02' },
   });
   const id = shift.shift.id;
 
@@ -504,7 +511,7 @@ test('two people tapping the same item at once is not an error', async () => {
   const staff = await signedIn('staff@test.com');
   const { data: shift } = await mgr('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'PM', businessDate: '2026-05-03' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-05-03' },
   });
   const id = shift.shift.id;
 
@@ -567,7 +574,7 @@ test('two devices see each other\'s work on the same shift', async () => {
 
   const { data: opened } = await tablet('/api/shifts', {
     method: 'POST',
-    body: { location: 'Point Loma', shiftType: 'AM', businessDate: '2026-06-01' },
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-06-01' },
   });
   const id = opened.shift.id;
 
@@ -578,4 +585,95 @@ test('two devices see each other\'s work on the same shift', async () => {
   const item = data.sections.flatMap((s) => s.items).find((i) => i.key === 'open-doors');
   assert.equal(item.state, 'done');
   assert.equal(item.checkedBy, 'Manny Manager');
+});
+
+test('the closing card is a different 37 items from the opening one', async () => {
+  const mgr = await signedIn('mgr@test.com');
+
+  const { data: opening } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-07-01' },
+  });
+  const { data: closing } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'closing', businessDate: '2026-07-01' },
+  });
+
+  // Same location and date, but two separate logs.
+  assert.notEqual(opening.shift.id, closing.shift.id);
+  assert.equal(opening.shift.templateName, 'Opening');
+  assert.equal(closing.shift.templateName, 'Closing');
+
+  assert.deepEqual(
+    opening.sections.map((s) => s.title),
+    ['Daily Admin', 'Before Open', 'Open', 'Pre-Peak', 'Peak', 'Post-Peak', 'Transition']
+  );
+  assert.deepEqual(
+    closing.sections.map((s) => s.title),
+    ['Shift Start', 'Pre-Peak', 'Peak', 'Post-Peak', 'Pre-Close', 'Close', 'Daily Admin']
+  );
+
+  assert.equal(opening.progress.total, 37);
+  assert.equal(closing.progress.total, 37);
+
+  // Four deck walks on each card, and they're checkable items.
+  for (const card of [opening, closing]) {
+    const walks = card.sections.flatMap((s) => s.items).filter((i) => i.deckWalk);
+    assert.equal(walks.length, 4);
+    assert.deepEqual(walks.map((w) => w.deckWalk).sort(), [1, 2, 3, 4]);
+  }
+});
+
+test('an item from the other card is refused', async () => {
+  const mgr = await signedIn('mgr@test.com');
+  const { data: closing } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Pacific Beach', templateKey: 'closing', businessDate: '2026-07-02' },
+  });
+
+  // "open-patio" belongs to the opening card only.
+  const wrongCard = await mgr(`/api/shifts/${closing.shift.id}/items/open-patio/state`, {
+    method: 'POST',
+    body: { state: 'done' },
+  });
+  assert.equal(wrongCard.status, 400);
+
+  const rightCard = await mgr(`/api/shifts/${closing.shift.id}/items/close-prep-list/state`, {
+    method: 'POST',
+    body: { state: 'done' },
+  });
+  assert.equal(rightCard.status, 200);
+});
+
+test('a deck walk ticks like any other item', async () => {
+  const staff = await signedIn('staff@test.com');
+  const { data: shift } = await staff('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'closing', businessDate: '2026-07-03' },
+  });
+
+  const { data } = await staff(`/api/shifts/${shift.shift.id}/items/close-deck-walk-4/state`, {
+    method: 'POST',
+    body: { state: 'done' },
+  });
+
+  const walk = data.sections.flatMap((s) => s.items).find((i) => i.key === 'close-deck-walk-4');
+  assert.equal(walk.state, 'done');
+  assert.equal(walk.deckWalk, 4);
+  assert.equal(walk.checkedBy, 'Sam Staff');
+});
+
+test('the deck walk guide is served whole', async () => {
+  const staff = await signedIn('staff@test.com');
+  const { status, data } = await staff('/api/deck-walk');
+
+  assert.equal(status, 200);
+  assert.equal(data.stations.length, 11, 'the Pass plus ten stops');
+  assert.deepEqual(data.stations.map((s) => s.stop), ['P', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']);
+  assert.equal(data.stations[0].key, 'pass');
+  assert.equal(data.stations.filter((s) => s.loop === 'boh').length, 5);
+  assert.equal(data.stations.filter((s) => s.loop === 'foh').length, 5);
+  assert.ok(data.stations.every((s) => s.checks.length >= 5), 'every stop carries its checks');
+  assert.match(data.rules.headline, /See it, fix it/);
+  assert.match(data.rules.cadence, /Four walks a shift/);
 });

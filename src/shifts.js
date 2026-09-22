@@ -1,6 +1,15 @@
 import { query, one, all, nowIso, logEvent, transaction, getJsonSetting } from './db.js';
 import { config } from './config.js';
-import { SECTIONS, ITEM_INDEX, TOTAL_ITEMS, TEMPLATE_VERSION, isKnownItem } from './template.js';
+import {
+  getTemplate,
+  findItem,
+  totalItems,
+  isKnownItem,
+  isKnownTemplate,
+  TEMPLATE_VERSION,
+  DEFAULT_TEMPLATE_KEY,
+  templateSummaries,
+} from './template.js';
 
 export const CHECK_STATES = ['open', 'done', 'na'];
 
@@ -62,7 +71,9 @@ export const isBusinessDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value
  * ------------------------------------------------------------------ */
 
 export const locations = () => getJsonSetting('locations', ['Point Loma', 'Pacific Beach']);
-export const shiftTypes = () => getJsonSetting('shift_types', ['AM', 'PM']);
+
+/** The logs a manager can run — one card per key. */
+export const shiftLogs = () => templateSummaries();
 
 export async function getShift(id) {
   const numeric = Number(id);
@@ -83,13 +94,16 @@ export async function findShift({ location, businessDate, shiftType }) {
  * Two devices opening the same shift at once is normal: ON CONFLICT makes the
  * insert a no-op for the loser, who then reads the winner's row.
  */
-export async function openShift({ location, businessDate, shiftType, user }) {
+export async function openShift({ location, businessDate, templateKey, user }) {
+  const template = getTemplate(templateKey);
+  const shiftType = template.name;
+
   const inserted = await one(
-    `INSERT INTO shifts(location, business_date, shift_type, template_version, status, opened_by, opened_at)
-     VALUES($1, $2, $3, $4, 'open', $5, $6)
+    `INSERT INTO shifts(location, business_date, shift_type, template_key, template_version, status, opened_by, opened_at)
+     VALUES($1, $2, $3, $4, $5, 'open', $6, $7)
      ON CONFLICT (location, business_date, shift_type) DO NOTHING
      RETURNING *`,
-    [location, businessDate, shiftType, TEMPLATE_VERSION, user.id, nowIso()]
+    [location, businessDate, shiftType, template.key, TEMPLATE_VERSION, user.id, nowIso()]
   );
 
   if (inserted) {
@@ -97,7 +111,7 @@ export async function openShift({ location, businessDate, shiftType, user }) {
       shiftId: inserted.id,
       userId: user.id,
       type: 'shift_opened',
-      detail: `${location} · ${businessDate} · ${shiftType}`,
+      detail: `${location} · ${businessDate} · ${template.name}`,
     });
     return inserted;
   }
@@ -155,6 +169,13 @@ export async function markRecapSent(shiftId, user, recipients) {
  * Checks
  * ------------------------------------------------------------------ */
 
+/** An item only exists relative to the card the shift is running. */
+function assertItem(shift, itemKey) {
+  if (!isKnownItem(shift.template_key, itemKey)) {
+    throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
+  }
+}
+
 /**
  * Create or update one item's row in a single statement. Doing this as an
  * upsert rather than read-then-write keeps two devices touching the same item
@@ -183,7 +204,7 @@ async function upsertCheck(tx, shiftId, itemKey, fields) {
 
 /** Tick, untick, or mark N/A. Stamps who and when on every completion. */
 export async function setCheckState(shift, itemKey, state, user) {
-  if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
+  assertItem(shift, itemKey);
   if (!CHECK_STATES.includes(state)) throw Object.assign(new Error('Invalid state.'), { status: 400 });
 
   return transaction(async (tx) => {
@@ -194,13 +215,16 @@ export async function setCheckState(shift, itemKey, state, user) {
       checked_at: isComplete ? nowIso() : null,
     });
     const type = state === 'done' ? 'item_done' : state === 'na' ? 'item_na' : 'item_reopened';
-    await logEvent({ shiftId: shift.id, userId: user.id, type, itemKey, detail: ITEM_INDEX.get(itemKey).label }, tx);
+    await logEvent(
+      { shiftId: shift.id, userId: user.id, type, itemKey, detail: findItem(shift.template_key, itemKey).label },
+      tx
+    );
     return check;
   });
 }
 
 export async function setCheckNote(shift, itemKey, note, user) {
-  if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
+  assertItem(shift, itemKey);
   const text = String(note || '').slice(0, 2000);
 
   return transaction(async (tx) => {
@@ -214,7 +238,7 @@ export async function setCheckNote(shift, itemKey, note, user) {
 }
 
 export async function setCheckFlag(shift, itemKey, flagged, user) {
-  if (!isKnownItem(itemKey)) throw Object.assign(new Error('Unknown checklist item.'), { status: 400 });
+  assertItem(shift, itemKey);
 
   return transaction(async (tx) => {
     const check = await upsertCheck(tx, shift.id, itemKey, { flagged: Boolean(flagged) });
@@ -224,7 +248,7 @@ export async function setCheckFlag(shift, itemKey, flagged, user) {
         userId: user.id,
         type: flagged ? 'flag_raised' : 'flag_cleared',
         itemKey,
-        detail: ITEM_INDEX.get(itemKey).label,
+        detail: findItem(shift.template_key, itemKey).label,
       },
       tx
     );
@@ -264,11 +288,12 @@ export async function shiftDetail(shiftId) {
   ]);
 
   const byKey = new Map(checkRows.map((row) => [row.item_key, row]));
+  const template = getTemplate(shift.template_key);
 
   let done = 0;
   let flagged = 0;
 
-  const sections = SECTIONS.map((section) => {
+  const sections = template.sections.map((section) => {
     const items = section.items.map((item) => {
       const check = byKey.get(item.key);
       const state = check?.state || 'open';
@@ -277,6 +302,7 @@ export async function shiftDetail(shiftId) {
       return {
         key: item.key,
         label: item.label,
+        deckWalk: item.deckWalk || null,
         state,
         note: check?.note || '',
         flagged: Boolean(check?.flagged),
@@ -290,7 +316,6 @@ export async function shiftDetail(shiftId) {
       key: section.key,
       title: section.title,
       blurb: section.blurb || '',
-      deckWalk: section.deckWalk || null,
       items,
       done: sectionDone,
       total: items.length,
@@ -302,7 +327,7 @@ export async function shiftDetail(shiftId) {
     id: event.id,
     type: event.type,
     itemKey: event.item_key,
-    itemLabel: event.item_key ? ITEM_INDEX.get(event.item_key)?.label || event.item_key : null,
+    itemLabel: event.item_key ? findItem(shift.template_key, event.item_key)?.label || event.item_key : null,
     detail: event.detail,
     user: event.user_id ? names.get(event.user_id) || 'Unknown' : 'System',
     createdAt: event.created_at,
@@ -316,6 +341,8 @@ export async function shiftDetail(shiftId) {
       businessDate: shift.business_date,
       businessDateLabel: formatBusinessDate(shift.business_date),
       shiftType: shift.shift_type,
+      templateKey: shift.template_key,
+      templateName: template.name,
       status: shift.status,
       summary: shift.summary,
       openedBy: shift.opened_by ? names.get(shift.opened_by) || 'Unknown' : null,
@@ -329,7 +356,12 @@ export async function shiftDetail(shiftId) {
     },
     sections,
     events,
-    progress: { done, total: TOTAL_ITEMS, flagged, percent: Math.round((done / TOTAL_ITEMS) * 100) },
+    progress: {
+      done,
+      total: template.sections.reduce((sum, section) => sum + section.items.length, 0),
+      flagged,
+      percent: Math.round((done / totalItems(shift.template_key)) * 100),
+    },
   };
 }
 
@@ -374,6 +406,8 @@ export async function listShifts({ location, from, to, limit = 60 } = {}) {
     businessDate: row.business_date,
     businessDateLabel: formatBusinessDate(row.business_date),
     shiftType: row.shift_type,
+    templateKey: row.template_key,
+    templateName: getTemplate(row.template_key).name,
     status: row.status,
     openedBy: row.opened_by_name,
     openedAtLabel: formatTime(row.opened_at),
@@ -381,8 +415,8 @@ export async function listShifts({ location, from, to, limit = 60 } = {}) {
     closedAtLabel: formatTime(row.closed_at),
     recapSentAt: row.recap_sent_at,
     done: row.done_count,
-    total: TOTAL_ITEMS,
+    total: totalItems(row.template_key),
     flagged: row.flag_count,
-    percent: Math.round((row.done_count / TOTAL_ITEMS) * 100),
+    percent: Math.round((row.done_count / totalItems(row.template_key)) * 100),
   }));
 }

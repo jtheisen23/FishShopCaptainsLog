@@ -10,9 +10,14 @@ a recap when the shift closes.
 
 ## What it does
 
-- **The full shift card**, in order: Daily Admin → Before Open → Open →
-  Pre-Peak → Peak → Post-Peak → Transition. All four Deck Walks are called out
-  where they fall.
+- **Two shift cards.** The **Opening** log runs Daily Admin → Before Open →
+  Open → Pre-Peak → Peak → Post-Peak → Transition. The **Closing** log runs
+  Shift Start → Pre-Peak → Peak → Post-Peak → Pre-Close → Close → Daily Admin.
+  They dovetail at the handover: the opening log ends with Deck Walk 4 handing
+  over, the closing log starts with Deck Walk 1 receiving.
+- **The Deck Walk guide** — the figure-eight route drawn out, all ten stops and
+  the Pass with their checks, and the walk rules. Reachable from the menu, and
+  from any deck walk on the card.
 - **Who and when on every check** — no more "I thought someone did the line check".
 - **Notes and flags on any item.** A flag means *the next manager needs to see
   this*; flagged items lead the recap.
@@ -70,8 +75,9 @@ Everything lives in `.env` (see `.env.example` for the annotated list).
 | `SEED_ADMIN_*` | Creates the first admin at startup when the database has no accounts. For hosts without free shell access. |
 | `SEED_ADMIN_RESET` | `true` resets that admin's password instead of creating an account — the way back in if you're locked out. Clear it afterwards. |
 
-Locations, shift types (AM/PM/Mid/…) and the default recap recipients are
-edited in the app under **Team & settings → Shop**, not in `.env`.
+Locations and the default recap recipients are edited in the app under
+**Team & settings → Shop**, not in `.env`. Which cards exist is set in
+`src/template.js`.
 
 ### Email
 
@@ -95,15 +101,20 @@ A closed shift is read-only — that's what makes the recap trustworthy. If
 something needs fixing after the fact, a manager reopens it, and the reopen is
 recorded in the log.
 
-## Changing the checklist
+## Changing the checklists
 
-The card lives in [`src/template.js`](src/template.js) as plain data. Edit an
-item's `label` any time. Adding, removing or re-keying items means bumping
-`TEMPLATE_VERSION` in the same file.
+Both cards live in [`src/template.js`](src/template.js) as plain data, under
+`TEMPLATES.opening` and `TEMPLATES.closing`. Edit an item's `label` any time.
+Adding, removing or re-keying items means bumping `TEMPLATE_VERSION` in the same
+file. Marking an item `deckWalk: n` draws it as one of the four walks.
 
 One rule: **never reuse or rename an existing item `key`.** Completed checks are
 stored against those keys, so a rename silently rewrites history. New item, new
-key.
+key. Each shift records which card it ran, so changing one card never disturbs
+shifts logged under the other.
+
+The Deck Walk route — the stops, their checks and the walk rules — is
+[`src/deck-walk.js`](src/deck-walk.js), and is reference material only.
 
 ## Deploying
 
@@ -249,7 +260,8 @@ npm test                      # embedded Postgres; no setup, no server needed
 scripts/test-postgres.sh      # the same suite against a real Postgres server
 ```
 
-41 tests covering the API, roles and permissions, the closed-shift rule, recap
+45 tests covering the API, roles and permissions, both cards and the rule that
+an item from one can't be checked on the other, the closed-shift rule, recap
 contents and HTML escaping, concurrent edits from two devices, multi-device
 sign-in, the admin bootstrap and recovery paths, and real SMTP delivery against
 a fake mail server.
@@ -270,7 +282,8 @@ src/
   config.js        .env loading and settings
   db.js            Postgres access, schema, settings, the event log
   auth.js          scrypt passwords, sessions, roles
-  template.js      THE CHECKLIST — edit this to change the card
+  template.js      THE CHECKLISTS — edit this to change either card
+  deck-walk.js     The Deck Walk route: stops, checks and rules
   shifts.js        Shifts, checks, notes, flags, business dates
   recap.js         Recap as text and as HTML email
   mail.js          SMTP

@@ -2,7 +2,7 @@ import express from 'express';
 import { requireAuth, requireRole, hasRole, publicUser } from '../auth.js';
 import { getJsonSetting } from '../db.js';
 import { config, smtpConfigured } from '../config.js';
-import { SECTIONS, TOTAL_ITEMS } from '../template.js';
+import { getTemplate, isKnownTemplate, templateSummaries, DEFAULT_TEMPLATE_KEY } from '../template.js';
 import {
   openShift,
   getShift,
@@ -19,9 +19,9 @@ import {
   businessDateFor,
   isBusinessDate,
   locations,
-  shiftTypes,
 } from '../shifts.js';
 import { buildRecap, recapHtml, recapText } from '../recap.js';
+import { deckWalkGuide } from '../deck-walk.js';
 import { sendMail, parseRecipients } from '../mail.js';
 import { ah, fail } from './helpers.js';
 
@@ -44,8 +44,8 @@ shiftsRouter.get(
       timezone: config.timezone,
       today: businessDateFor(),
       locations: await locations(),
-      shiftTypes: await shiftTypes(),
-      template: { sections: SECTIONS, totalItems: TOTAL_ITEMS },
+      logs: templateSummaries(),
+      defaultLog: DEFAULT_TEMPLATE_KEY,
       emailEnabled: smtpConfigured,
       defaultRecipients: hasRole(req.user, 'manager') ? await getJsonSetting('recap_recipients', []) : [],
     });
@@ -54,6 +54,14 @@ shiftsRouter.get(
 
 // Everything below this line requires a signed-in user.
 shiftsRouter.use(requireAuth);
+
+/** The Deck Walk route: reference material, the same for everyone. */
+shiftsRouter.get(
+  '/deck-walk',
+  ah((_req, res) => {
+    res.json(deckWalkGuide());
+  })
+);
 
 /** Load a shift and make sure it's writable before a mutation goes through. */
 async function loadShift(req, { mustBeOpen = false } = {}) {
@@ -84,14 +92,14 @@ shiftsRouter.post(
   '/shifts',
   ah(async (req, res) => {
     const location = String(req.body?.location || '').trim();
-    const shiftType = String(req.body?.shiftType || '').trim();
+    const templateKey = String(req.body?.templateKey || DEFAULT_TEMPLATE_KEY).trim();
     const businessDate = String(req.body?.businessDate || businessDateFor()).trim();
 
     if (!(await locations()).includes(location)) fail(400, 'Pick a valid location.');
-    if (!(await shiftTypes()).includes(shiftType)) fail(400, 'Pick a valid shift.');
+    if (!isKnownTemplate(templateKey)) fail(400, 'Pick a valid log — opening or closing.');
     if (!isBusinessDate(businessDate)) fail(400, 'Business date must look like YYYY-MM-DD.');
 
-    const shift = await openShift({ location, businessDate, shiftType, user: req.user });
+    const shift = await openShift({ location, businessDate, templateKey, user: req.user });
     res.json(await shiftDetail(shift.id));
   })
 );

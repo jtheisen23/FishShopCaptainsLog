@@ -107,12 +107,11 @@ adminRouter.get(
 );
 
 async function readSettings() {
-  const [locations, shiftTypes, recapRecipients] = await Promise.all([
+  const [locations, recapRecipients] = await Promise.all([
     getJsonSetting('locations', []),
-    getJsonSetting('shift_types', []),
     getJsonSetting('recap_recipients', []),
   ]);
-  return { locations, shiftTypes, recapRecipients };
+  return { locations, recapRecipients };
 }
 
 adminRouter.put(
@@ -122,12 +121,6 @@ adminRouter.put(
       const cleaned = [...new Set(req.body.locations.map((v) => String(v).trim()).filter(Boolean))];
       if (!cleaned.length) fail(400, 'Keep at least one location.');
       await setJsonSetting('locations', cleaned);
-    }
-
-    if (Array.isArray(req.body?.shiftTypes)) {
-      const cleaned = [...new Set(req.body.shiftTypes.map((v) => String(v).trim()).filter(Boolean))];
-      if (!cleaned.length) fail(400, 'Keep at least one shift type.');
-      await setJsonSetting('shift_types', cleaned);
     }
 
     if (req.body?.recapRecipients !== undefined) {
