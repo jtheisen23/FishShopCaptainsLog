@@ -15,6 +15,14 @@ if (!config.databaseUrl) {
   process.exit(0);
 }
 
+const safeDecode = (value) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
 /** Show the host without ever printing the password. */
 function describe(url) {
   try {
@@ -25,7 +33,8 @@ function describe(url) {
       database: parsed.pathname.replace(/^\//, '') || '(default)',
       user: decodeURIComponent(parsed.username) || '(none)',
       hasPassword: Boolean(parsed.password),
-      rawPassword: parsed.password,
+      // URL() percent-encodes what it parses, so decode before inspecting.
+      rawPassword: safeDecode(parsed.password),
     };
   } catch {
     return null;
@@ -58,9 +67,17 @@ if ((config.databaseUrl.match(/@/g) || []).length > 1) {
   process.exit(1);
 }
 
-if (/\[YOUR-PASSWORD\]|\[your-password\]/.test(config.databaseUrl)) {
+if (/\[YOUR-PASSWORD\]|\[your-password\]/i.test(config.databaseUrl)) {
   console.error('The password is still the placeholder your provider printed.');
-  console.error('Replace [YOUR-PASSWORD] with your real database password.');
+  console.error('Replace [YOUR-PASSWORD] — brackets included — with your real password.');
+  process.exit(1);
+}
+
+// Brackets are the placeholder's markers, not part of anyone's password.
+if (/^\[.*\]$/.test(info.rawPassword || '')) {
+  console.error('Your password is still wrapped in square brackets.');
+  console.error('The [ ] only marked where to type — remove them:');
+  console.error('  :[mySecret123]@   should be   :mySecret123@');
   process.exit(1);
 }
 

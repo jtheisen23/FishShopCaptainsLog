@@ -27,10 +27,37 @@ function wrap(client) {
   };
 }
 
+/** Catch the paste mistakes that otherwise surface as unrelated errors. */
+function assertUsableUrl(url) {
+  if (/\[YOUR-PASSWORD\]/i.test(url)) {
+    throw new Error(
+      'DATABASE_URL still contains the [YOUR-PASSWORD] placeholder. Replace it — brackets included — with your database password.'
+    );
+  }
+  let password = '';
+  try {
+    // URL() percent-encodes what it parses, so decode before inspecting.
+    password = decodeURIComponent(new URL(url).password);
+  } catch {
+    throw new Error(`DATABASE_URL is not a valid connection string. It should look like postgresql://user:password@host:5432/dbname`);
+  }
+  if (/^\[.*\]$/.test(password)) {
+    throw new Error(
+      'The password in DATABASE_URL is wrapped in square brackets. Those only marked where to type — remove them.'
+    );
+  }
+  if ((url.match(/@/g) || []).length > 1) {
+    throw new Error(
+      'DATABASE_URL contains more than one "@". If your password has an @ in it, write it as %40 (also : → %3A, / → %2F, # → %23).'
+    );
+  }
+}
+
 export async function initDb() {
   if (driver !== 'none') return;
 
   if (config.databaseUrl) {
+    assertUsableUrl(config.databaseUrl);
     const { default: pg } = await import('pg');
     pool = new pg.Pool({
       connectionString: config.databaseUrl,

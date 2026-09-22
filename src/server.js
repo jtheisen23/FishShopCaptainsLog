@@ -90,8 +90,10 @@ export async function start() {
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   start().catch((error) => {
     console.error('Failed to start:', error.message);
-    if (error.message.includes('ECONNREFUSED') || error.message.includes('password')) {
+    // Only add the generic hint when the error hasn't already named the cause.
+    if (!/DATABASE_URL/.test(error.message)) {
       console.error('Check DATABASE_URL — the app could not reach your Postgres database.');
+      console.error('Run `npm run check-db` to test your connection string.');
     }
     process.exit(1);
   });
