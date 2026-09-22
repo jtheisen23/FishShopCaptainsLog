@@ -359,6 +359,12 @@ function passwordSheet() {
      </div>`,
     (sheet, close) => {
       const errorBox = sheet.querySelector('[data-error]');
+
+      sheet.querySelector('[data-self-password]')?.addEventListener('click', () => {
+        close();
+        passwordSheet();
+      });
+
       sheet.querySelector('[data-save]').addEventListener('click', async () => {
         errorBox.hidden = true;
         try {
@@ -1111,6 +1117,11 @@ async function renderTeamTab(host) {
 
 function userSheet(user, host) {
   const editing = Boolean(user);
+  // Editing yourself is a different job from administering someone else: the
+  // reset field would sign you out everywhere and then demand a second new
+  // password on the way back in, and the server refuses a self demotion or
+  // self deactivation anyway.
+  const isSelf = editing && user.id === state.boot.user.id;
 
   openSheet(
     `<h2>${editing ? esc(user.name) : 'Add a team member'}</h2>
@@ -1123,21 +1134,30 @@ function userSheet(user, host) {
               autocapitalize="none" spellcheck="false"></div>`}
        <div class="field">
          <label>Role</label>
-         <select class="input" data-role>
+         <select class="input" data-role ${isSelf ? 'disabled' : ''}>
            ${['staff', 'manager', 'admin'].map((role) =>
              `<option value="${role}"${editing && user.role === role ? ' selected' : ''}>${role}</option>`).join('')}
          </select>
+         ${isSelf ? `<span class="tiny muted">You can't change your own role — ask another admin.</span>` : ''}
        </div>
-       <div class="field">
-         <label>${editing ? 'Reset password to' : 'Temporary password'}</label>
-         <input class="input" data-password type="text" autocapitalize="none" spellcheck="false"
-                placeholder="${editing ? 'Leave blank to keep current' : 'At least 8 characters'}">
-         <span class="tiny muted">They'll be asked to choose their own on first sign-in.</span>
-       </div>
+       ${isSelf ? `
+         <div class="field">
+           <label>Your password</label>
+           <button type="button" class="btn secondary block" data-self-password>Change my password</button>
+           <span class="tiny muted">Resetting it from here would sign you out of every device, so it's done separately.</span>
+         </div>`
+       : `
+         <div class="field">
+           <label>${editing ? 'Reset password to' : 'Temporary password'}</label>
+           <input class="input" data-password type="text" autocapitalize="none" spellcheck="false"
+                  placeholder="${editing ? 'Leave blank to keep current' : 'At least 8 characters'}">
+           <span class="tiny muted">They'll be asked to choose their own on first sign-in${editing ? ', and this signs them out everywhere' : ''}.</span>
+         </div>`}
        ${editing ? `
-         <label class="row" style="gap:10px;cursor:pointer;">
-           <input type="checkbox" data-active ${user.active ? 'checked' : ''} style="width:22px;height:22px;flex:none;">
-           <span class="grow small">Active — can sign in</span>
+         <label class="row" style="gap:10px;${isSelf ? 'opacity:.55;' : 'cursor:pointer;'}">
+           <input type="checkbox" data-active ${user.active ? 'checked' : ''} ${isSelf ? 'disabled' : ''}
+                  style="width:22px;height:22px;flex:none;">
+           <span class="grow small">Active — can sign in${isSelf ? ' (you can\'t deactivate yourself)' : ''}</span>
          </label>` : ''}
        <div class="row">
          <button class="btn secondary grow" data-close>Cancel</button>
@@ -1146,15 +1166,22 @@ function userSheet(user, host) {
      </div>`,
     (sheet, close) => {
       const errorBox = sheet.querySelector('[data-error]');
+
+      sheet.querySelector('[data-self-password]')?.addEventListener('click', () => {
+        close();
+        passwordSheet();
+      });
+
       sheet.querySelector('[data-save]').addEventListener('click', async () => {
         errorBox.hidden = true;
         const name = sheet.querySelector('[data-name]').value.trim();
         const role = sheet.querySelector('[data-role]').value;
-        const password = sheet.querySelector('[data-password]').value;
+        const password = sheet.querySelector('[data-password]')?.value || '';
 
         try {
           if (editing) {
-            const body = { name, role, active: sheet.querySelector('[data-active]').checked };
+            // Send only what this admin is allowed to change on this account.
+            const body = isSelf ? { name } : { name, role, active: sheet.querySelector('[data-active]').checked };
             if (password) body.password = password;
             await api(`/admin/users/${user.id}`, { method: 'PATCH', body });
             toast('Saved.');
