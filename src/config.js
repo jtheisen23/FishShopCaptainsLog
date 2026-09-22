@@ -24,6 +24,19 @@ function loadDotEnv(file) {
 
 loadDotEnv(path.join(ROOT, '.env'));
 
+/**
+ * Connection strings get pasted through dashboards, and they arrive with
+ * stray quotes, spaces or a trailing newline surprisingly often. None of
+ * those are ever meaningful, and each produces a baffling error.
+ */
+function cleanUrl(value) {
+  let url = String(value || '').trim();
+  if ((url.startsWith('"') && url.endsWith('"')) || (url.startsWith("'") && url.endsWith("'"))) {
+    url = url.slice(1, -1).trim();
+  }
+  return url;
+}
+
 const bool = (value, fallback) => {
   if (value === undefined || value === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
@@ -38,7 +51,7 @@ export const config = {
    * embedded Postgres out of `pgliteDir`, which is what local development and
    * the test suite use.
    */
-  databaseUrl: process.env.DATABASE_URL || '',
+  databaseUrl: cleanUrl(process.env.DATABASE_URL),
   databaseSsl: bool(process.env.DATABASE_SSL, true),
   /** Set false only if your provider's TLS chain won't verify from your host. */
   databaseSslStrict: bool(process.env.DATABASE_SSL_STRICT, false),
