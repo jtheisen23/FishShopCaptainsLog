@@ -53,6 +53,56 @@ function assertUsableUrl(url) {
   }
 }
 
+/**
+ * Turn a driver error into something that names the likely cause. This runs in
+ * the deploy log, which is often the only diagnostic a person can reach when
+ * the service won't start.
+ */
+function explainConnectionError(error, url) {
+  let user = '';
+  let host = '';
+  try {
+    const parsed = new URL(url);
+    user = decodeURIComponent(parsed.username);
+    host = parsed.hostname;
+  } catch {
+    /* fall through to the raw error */
+  }
+
+  const message = String(error.message || '');
+  const isPooler = /pooler\.supabase\.com$/i.test(host);
+  const hints = [];
+
+  if (/password|authentication|SASL/i.test(message)) {
+    if (isPooler && !user.includes('.')) {
+      hints.push(
+        `The username "${user}" is wrong for a Supabase pooler: it needs to be "postgres.<your-project-ref>", not plain "postgres".`,
+        'Copy the Session pooler string fresh from Supabase (Connect → Session pooler) rather than editing the direct-connection one.'
+      );
+    } else {
+      hints.push(
+        'The server rejected the username or password.',
+        'If the password contains @ : / or #, percent-encode it (@ becomes %40), or reset it in your provider\'s dashboard.'
+      );
+    }
+  } else if (/ENETUNREACH|EHOSTUNREACH/i.test(message)) {
+    hints.push(
+      `Could not reach ${host} over the network.`,
+      'On Supabase this usually means the "Direct connection" string, which is IPv6-only. Use the Session pooler instead.'
+    );
+  } else if (/ENOTFOUND|EAI_AGAIN/i.test(message)) {
+    hints.push(`The hostname "${host}" does not resolve. Check it for typos.`);
+  } else if (/does not exist/i.test(message)) {
+    hints.push('That database does not exist on the server named in DATABASE_URL.');
+  }
+
+  if (!hints.length) return error;
+
+  const enriched = new Error(`${message}\n  ${hints.join('\n  ')}`);
+  enriched.cause = error;
+  return enriched;
+}
+
 export async function initDb() {
   if (driver !== 'none') return;
 
@@ -71,6 +121,18 @@ export async function initDb() {
       connectionTimeoutMillis: 15_000,
     });
     pool.on('error', (error) => console.error('[postgres pool]', error.message));
+
+    // Connect once up front so a bad connection string is explained here,
+    // rather than surfacing later as an opaque failure mid-request.
+    try {
+      const probe = await pool.connect();
+      probe.release();
+    } catch (error) {
+      await pool.end().catch(() => {});
+      pool = null;
+      throw explainConnectionError(error, config.databaseUrl);
+    }
+
     driver = 'postgres';
   } else {
     // Falling back to the embedded database in production would "work" while
