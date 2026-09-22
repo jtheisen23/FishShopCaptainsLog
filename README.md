@@ -136,8 +136,13 @@ it on that same page if you've lost it):
 postgresql://postgres.abcdefgh:[YOUR-PASSWORD]@aws-0-us-west-1.pooler.supabase.com:5432/postgres
 ```
 
-If your password contains `@`, `/`, `:` or `#`, percent-encode it — those
-characters otherwise split the URL in the wrong places. `@` becomes `%40`.
+Only four characters need percent-encoding, because they're the separators the
+URL format itself uses: `@` → `%40`, `:` → `%3A`, `/` → `%2F`, `#` → `%23`.
+Everything else — `$`, `!`, `*`, `-`, `_`, `.` — passes through as-is.
+
+If your provider already shows the password encoded (`$` as `%24`, say), leave
+it alone. Encoding it a second time turns `%24` into `%2524` and authentication
+fails. When in doubt, reset the password to letters and numbers only.
 
 Connecting your Supabase project to GitHub is unrelated to any of this; that
 feature creates preview databases per branch. It does no harm, but the

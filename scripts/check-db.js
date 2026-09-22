@@ -35,6 +35,7 @@ function describe(url) {
       hasPassword: Boolean(parsed.password),
       // URL() percent-encodes what it parses, so decode before inspecting.
       rawPassword: safeDecode(parsed.password),
+      encodedPassword: parsed.password,
     };
   } catch {
     return null;
@@ -139,6 +140,9 @@ try {
     console.error('The server rejected the username or password.');
     if (/pooler\.supabase\.com$/i.test(info.host) && !info.user.includes('.')) {
       console.error('Most likely the username: a pooler needs "postgres.<project-ref>".');
+    } else if (/%25/.test(info.encodedPassword || '')) {
+      console.error('The password looks double-encoded — it contains "%25", an encoded "%".');
+      console.error('If your password has $ in it, "%24" is already correct. Do not encode it twice.');
     }
     console.error('If your password contains @ : / or #, percent-encode it (@ becomes %40),');
     console.error('or reset the database password in your provider\'s dashboard.');

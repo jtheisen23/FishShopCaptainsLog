@@ -61,10 +61,12 @@ function assertUsableUrl(url) {
 function explainConnectionError(error, url) {
   let user = '';
   let host = '';
+  let rawPassword = '';
   try {
     const parsed = new URL(url);
     user = decodeURIComponent(parsed.username);
     host = parsed.hostname;
+    rawPassword = parsed.password;
   } catch {
     /* fall through to the raw error */
   }
@@ -79,10 +81,19 @@ function explainConnectionError(error, url) {
         `The username "${user}" is wrong for a Supabase pooler: it needs to be "postgres.<your-project-ref>", not plain "postgres".`,
         'Copy the Session pooler string fresh from Supabase (Connect → Session pooler) rather than editing the direct-connection one.'
       );
+    } else if (/%25/.test(rawPassword)) {
+      // %25 is an encoded '%'. Legitimate if the password really contains one,
+      // but far more often it means an already-encoded string got encoded again.
+      hints.push(
+        'The password looks double-encoded: it contains "%25", which is an encoded "%".',
+        'If your password has $ in it, "%24" is already correct — do not encode it again.',
+        'Paste the connection string exactly as your provider shows it, changing only the password.'
+      );
     } else {
       hints.push(
         'The server rejected the username or password.',
-        'If the password contains @ : / or #, percent-encode it (@ becomes %40), or reset it in your provider\'s dashboard.'
+        'If the password contains @ : / or #, percent-encode it (@ becomes %40), or reset it in your provider\'s dashboard.',
+        'Characters like $ ! * - _ need no encoding at all.'
       );
     }
   } else if (/ENETUNREACH|EHOSTUNREACH/i.test(message)) {
