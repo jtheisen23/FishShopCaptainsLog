@@ -15,7 +15,7 @@ process.env.TIMEZONE = 'America/Los_Angeles';
 process.env.NODE_ENV = 'test';
 
 const { app } = await import('../src/server.js');
-const { initDb, closeDb } = await import('../src/db.js');
+const { initDb, closeDb, query } = await import('../src/db.js');
 const { createUser } = await import('../src/auth.js');
 const { businessDateFor } = await import('../src/shifts.js');
 
@@ -676,4 +676,200 @@ test('the deck walk guide is served whole', async () => {
   assert.ok(data.stations.every((s) => s.checks.length >= 5), 'every stop carries its checks');
   assert.match(data.rules.headline, /See it, fix it/);
   assert.match(data.rules.cadence, /Four walks a shift/);
+});
+
+/* ------------------------- deleting a shift ---------------------------- */
+
+test('only an admin can delete a shift, and it takes its log with it', async () => {
+  const gm = await signedIn('gm@test.com');
+  const mgr = await signedIn('mgr@test.com');
+  const staff = await signedIn('staff@test.com');
+
+  const { data: shift } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-08-01' },
+  });
+  const id = shift.shift.id;
+
+  await mgr(`/api/shifts/${id}/items/open-doors/state`, { method: 'POST', body: { state: 'done' } });
+  await mgr(`/api/shifts/${id}/log`, { method: 'POST', body: { text: 'Something worth remembering.' } });
+
+  assert.equal((await staff(`/api/shifts/${id}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await mgr(`/api/shifts/${id}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await gm(`/api/shifts/${id}`)).status, 200, 'still there after the refusals');
+
+  const removed = await gm(`/api/shifts/${id}`, { method: 'DELETE' });
+  assert.equal(removed.status, 200);
+  assert.match(removed.data.description, /Point Loma · Opening · 2026-08-01/);
+
+  assert.equal((await gm(`/api/shifts/${id}`)).status, 404);
+  const { data } = await gm('/api/shifts?from=2026-08-01&to=2026-08-01');
+  assert.equal(data.shifts.length, 0);
+});
+
+test('deleting is recorded even though the shift is gone', async () => {
+  const gm = await signedIn('gm@test.com');
+  const { data: shift } = await gm('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Pacific Beach', templateKey: 'closing', businessDate: '2026-08-02' },
+  });
+
+  await gm(`/api/shifts/${shift.shift.id}`, { method: 'DELETE' });
+
+  // The audit row is written against no shift, so it survives the cascade.
+  const { rows } = await query("SELECT * FROM events WHERE type = 'shift_deleted' ORDER BY id DESC LIMIT 1");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].shift_id, null);
+  assert.match(rows[0].detail, /Pacific Beach · Closing · 2026-08-02/);
+});
+
+test('deleting a shift that does not exist is a 404', async () => {
+  const gm = await signedIn('gm@test.com');
+  assert.equal((await gm('/api/shifts/99999', { method: 'DELETE' })).status, 404);
+});
+
+/* --------------------- who ran the shift, in listings ------------------- */
+
+test('shift listings say who opened and closed each one', async () => {
+  const mgr = await signedIn('mgr@test.com');
+  const gm = await signedIn('gm@test.com');
+
+  const { data: shift } = await mgr('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-08-03' },
+  });
+  await gm(`/api/shifts/${shift.shift.id}/close`, { method: 'POST', body: { summary: 'Quiet one.' } });
+
+  const { data } = await gm('/api/shifts?from=2026-08-03&to=2026-08-03');
+  const row = data.shifts.find((s) => s.businessDate === '2026-08-03');
+  assert.equal(row.openedBy, 'Manny Manager');
+  assert.equal(row.closedBy, 'Gina GM');
+  assert.equal(row.templateName, 'Opening');
+  assert.ok(row.openedAtLabel, 'and when');
+});
+
+/* ----------------------- per-user location access ---------------------- */
+
+test('a user assigned to one location cannot touch another', async () => {
+  const gm = await signedIn('gm@test.com');
+
+  const { data: created } = await gm('/api/admin/users', {
+    method: 'POST',
+    body: {
+      email: 'oceanside@test.com',
+      name: 'Olive Oceanside',
+      role: 'manager',
+      password: 'temp12345',
+      locations: ['Pacific Beach'],
+    },
+  });
+  assert.deepEqual(created.user.locations, ['Pacific Beach']);
+
+  const olive = await signedIn('oceanside@test.com', 'temp12345');
+  await olive('/api/auth/password', {
+    method: 'POST',
+    body: { currentPassword: 'temp12345', newPassword: 'olives-own-password' },
+  });
+
+  // Their own location works.
+  const allowed = await olive('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Pacific Beach', templateKey: 'opening', businessDate: '2026-08-04' },
+  });
+  assert.equal(allowed.status, 200);
+
+  // Another location is refused, even though it exists.
+  const refused = await olive('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-08-04' },
+  });
+  assert.equal(refused.status, 403);
+  assert.match(refused.data.error, /not assigned to Point Loma/);
+
+  // And they can't reach a shift someone else opened there.
+  const { data: elsewhere } = await gm('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'closing', businessDate: '2026-08-05' },
+  });
+  const otherId = elsewhere.shift.id;
+
+  assert.equal((await olive(`/api/shifts/${otherId}`)).status, 403);
+  assert.equal((await olive(`/api/shifts/${otherId}/recap.txt`)).status, 403);
+  assert.equal(
+    (await olive(`/api/shifts/${otherId}/items/close-prep-list/state`, { method: 'POST', body: { state: 'done' } }))
+      .status,
+    403
+  );
+});
+
+test('a restricted user only sees their own locations', async () => {
+  const gm = await signedIn('gm@test.com');
+  const olive = await signedIn('oceanside@test.com', 'olives-own-password');
+
+  const boot = await olive('/api/bootstrap');
+  assert.deepEqual(boot.data.locations, ['Pacific Beach'], 'the picker offers only their location');
+
+  const { data } = await olive('/api/shifts');
+  assert.ok(data.shifts.length > 0);
+  assert.ok(data.shifts.every((s) => s.location === 'Pacific Beach'), 'history is filtered too');
+
+  // An unrestricted account still sees everything.
+  const all = await gm('/api/shifts');
+  assert.ok(all.data.shifts.some((s) => s.location !== 'Pacific Beach'));
+});
+
+test('an empty assignment means every location', async () => {
+  const gm = await signedIn('gm@test.com');
+  const { data: created } = await gm('/api/admin/users', {
+    method: 'POST',
+    body: { email: 'roaming@test.com', name: 'Rosa Roaming', role: 'manager', password: 'temp12345', locations: [] },
+  });
+  assert.deepEqual(created.user.locations, []);
+
+  const rosa = await signedIn('roaming@test.com', 'temp12345');
+  await rosa('/api/auth/password', {
+    method: 'POST',
+    body: { currentPassword: 'temp12345', newPassword: 'rosas-own-password' },
+  });
+
+  const boot = await rosa('/api/bootstrap');
+  assert.ok(boot.data.locations.length >= 2, 'unrestricted sees every location');
+
+  for (const location of ['Point Loma', 'Pacific Beach']) {
+    const res = await rosa('/api/shifts', {
+      method: 'POST',
+      body: { location, templateKey: 'opening', businessDate: '2026-08-06' },
+    });
+    assert.equal(res.status, 200, `${location} should be allowed`);
+  }
+});
+
+test('an assignment must name locations that exist', async () => {
+  const gm = await signedIn('gm@test.com');
+  const res = await gm('/api/admin/users', {
+    method: 'POST',
+    body: { email: 'nowhere@test.com', name: 'No Where', role: 'staff', password: 'temp12345', locations: ['Atlantis'] },
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /Atlantis/);
+});
+
+test('an assignment can be changed later', async () => {
+  const gm = await signedIn('gm@test.com');
+  const { data: users } = await gm('/api/admin/users');
+  const olive = users.users.find((u) => u.email === 'oceanside@test.com');
+
+  const updated = await gm(`/api/admin/users/${olive.id}`, {
+    method: 'PATCH',
+    body: { locations: ['Point Loma', 'Pacific Beach'] },
+  });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.data.user.locations, ['Point Loma', 'Pacific Beach']);
+
+  const reopened = await signedIn('oceanside@test.com', 'olives-own-password');
+  const allowedNow = await reopened('/api/shifts', {
+    method: 'POST',
+    body: { location: 'Point Loma', templateKey: 'opening', businessDate: '2026-08-07' },
+  });
+  assert.equal(allowedNow.status, 200);
 });

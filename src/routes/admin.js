@@ -10,9 +10,10 @@ import {
   passwordProblem,
   destroyAllSessionsForUser,
   normalizeEmail,
+  normalizeLocations,
   ROLES,
 } from '../auth.js';
-import { query, logEvent, getJsonSetting, setJsonSetting } from '../db.js';
+import { query, logEvent, getJsonSetting, setJsonSetting, getSetting, setSetting } from '../db.js';
 import { parseRecipients, verifyMailTransport } from '../mail.js';
 import { ah, fail } from './helpers.js';
 
@@ -21,6 +22,21 @@ export const adminRouter = express.Router();
 adminRouter.use(requireRole('admin'));
 
 /* ---------------------------------- users --------------------------------- */
+
+/**
+ * Validate an assignment against the locations that actually exist. An empty
+ * list is meaningful: it means every location, now and in the future.
+ */
+async function checkLocations(input) {
+  if (input === undefined || input === null) return [];
+  const cleaned = normalizeLocations(input);
+  if (!cleaned.length) return [];
+
+  const configured = await getJsonSetting('locations', []);
+  const unknown = cleaned.filter((location) => !configured.includes(location));
+  if (unknown.length) fail(400, `Not a location you have: ${unknown.join(', ')}`);
+  return cleaned;
+}
 
 adminRouter.get(
   '/users',
@@ -37,6 +53,7 @@ adminRouter.post(
     const name = String(req.body?.name || '').trim();
     const role = String(req.body?.role || 'staff');
     const password = String(req.body?.password || '');
+    const assigned = await checkLocations(req.body?.locations);
 
     if (!email.includes('@')) fail(400, 'Enter a valid email address.');
     if (!name) fail(400, 'Enter a name.');
@@ -45,7 +62,14 @@ adminRouter.post(
     if (problem) fail(400, problem);
     if (await findUserByEmail(email)) fail(409, 'Someone already uses that email.');
 
-    const user = await createUser({ email, name, password, role, mustChangePassword: true });
+    const user = await createUser({
+      email,
+      name,
+      password,
+      role,
+      mustChangePassword: true,
+      locations: assigned,
+    });
     await logEvent({ userId: req.user.id, type: 'user_created', detail: `${name} <${email}> as ${role}` });
     res.status(201).json({ user: publicUser(user) });
   })
@@ -80,6 +104,12 @@ adminRouter.patch(
       changes.push(req.body.active ? 'reactivated' : 'deactivated');
     }
 
+    if (req.body?.locations !== undefined) {
+      const assigned = await checkLocations(req.body.locations);
+      await query('UPDATE users SET locations = $1 WHERE id = $2', [JSON.stringify(assigned), user.id]);
+      changes.push(assigned.length ? `locations → ${assigned.join(', ')}` : 'locations → all');
+    }
+
     if (typeof req.body?.password === 'string' && req.body.password) {
       const problem = passwordProblem(req.body.password);
       if (problem) fail(400, problem);
@@ -107,11 +137,12 @@ adminRouter.get(
 );
 
 async function readSettings() {
-  const [locations, recapRecipients] = await Promise.all([
+  const [locations, recapRecipients, logoUrl] = await Promise.all([
     getJsonSetting('locations', []),
     getJsonSetting('recap_recipients', []),
+    getSetting('brand_logo_url', ''),
   ]);
-  return { locations, recapRecipients };
+  return { locations, recapRecipients, logoUrl };
 }
 
 adminRouter.put(
@@ -121,6 +152,15 @@ adminRouter.put(
       const cleaned = [...new Set(req.body.locations.map((v) => String(v).trim()).filter(Boolean))];
       if (!cleaned.length) fail(400, 'Keep at least one location.');
       await setJsonSetting('locations', cleaned);
+    }
+
+    if (req.body?.logoUrl !== undefined) {
+      const url = String(req.body.logoUrl || '').trim();
+      // A remote image in the app bar: allow an https URL or a path we serve.
+      if (url && !/^(https:\/\/|\/)[^\s]+$/i.test(url)) {
+        fail(400, 'The logo must be an https:// address, or a path starting with /.');
+      }
+      await setSetting('brand_logo_url', url);
     }
 
     if (req.body?.recapRecipients !== undefined) {

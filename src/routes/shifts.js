@@ -1,11 +1,12 @@
 import express from 'express';
-import { requireAuth, requireRole, hasRole, publicUser } from '../auth.js';
-import { getJsonSetting } from '../db.js';
+import { requireAuth, requireRole, hasRole, publicUser, userLocations, canUseLocation, isUnrestricted } from '../auth.js';
+import { getJsonSetting, getSetting } from '../db.js';
 import { config, smtpConfigured } from '../config.js';
 import { getTemplate, isKnownTemplate, templateSummaries, DEFAULT_TEMPLATE_KEY } from '../template.js';
 import {
   openShift,
   getShift,
+  deleteShift,
   markRecapSent,
   shiftDetail,
   listShifts,
@@ -36,14 +37,20 @@ shiftsRouter.get(
   '/bootstrap',
   ah(async (req, res) => {
     if (!req.user) {
-      return res.json({ user: null, brandName: config.brandName });
+      return res.json({
+        user: null,
+        brandName: config.brandName,
+        logoUrl: await getSetting('brand_logo_url', ''),
+      });
     }
     res.json({
       user: publicUser(req.user),
       brandName: config.brandName,
+      logoUrl: await getSetting('brand_logo_url', ''),
       timezone: config.timezone,
       today: businessDateFor(),
-      locations: await locations(),
+      locations: await visibleLocations(req.user),
+      allLocations: hasRole(req.user, 'admin') ? await locations() : undefined,
       logs: templateSummaries(),
       defaultLog: DEFAULT_TEMPLATE_KEY,
       emailEnabled: smtpConfigured,
@@ -54,6 +61,14 @@ shiftsRouter.get(
 
 // Everything below this line requires a signed-in user.
 shiftsRouter.use(requireAuth);
+
+/** The locations this account may open shifts for, in configured order. */
+async function visibleLocations(user) {
+  const configured = await locations();
+  if (isUnrestricted(user)) return configured;
+  const allowed = userLocations(user);
+  return configured.filter((location) => allowed.includes(location));
+}
 
 /** The Deck Walk route: reference material, the same for everyone. */
 shiftsRouter.get(
@@ -67,6 +82,9 @@ shiftsRouter.get(
 async function loadShift(req, { mustBeOpen = false } = {}) {
   const shift = await getShift(req.params.id);
   if (!shift) fail(404, 'That shift does not exist.');
+  if (!canUseLocation(req.user, shift.location)) {
+    fail(403, `You are not assigned to ${shift.location}.`);
+  }
   if (mustBeOpen && shift.status !== 'open') {
     fail(409, 'This shift is closed. A manager can reopen it if something needs changing.');
   }
@@ -82,6 +100,7 @@ shiftsRouter.get(
         from: req.query.from,
         to: req.query.to,
         limit: req.query.limit,
+        onlyLocations: isUnrestricted(req.user) ? null : userLocations(req.user),
       }),
     });
   })
@@ -96,6 +115,7 @@ shiftsRouter.post(
     const businessDate = String(req.body?.businessDate || businessDateFor()).trim();
 
     if (!(await locations()).includes(location)) fail(400, 'Pick a valid location.');
+    if (!canUseLocation(req.user, location)) fail(403, `You are not assigned to ${location}.`);
     if (!isKnownTemplate(templateKey)) fail(400, 'Pick a valid log — opening or closing.');
     if (!isBusinessDate(businessDate)) fail(400, 'Business date must look like YYYY-MM-DD.');
 
@@ -107,9 +127,8 @@ shiftsRouter.post(
 shiftsRouter.get(
   '/shifts/:id',
   ah(async (req, res) => {
-    const detail = await shiftDetail(req.params.id);
-    if (!detail) fail(404, 'That shift does not exist.');
-    res.json(detail);
+    const shift = await loadShift(req);
+    res.json(await shiftDetail(shift.id));
   })
 );
 
@@ -186,6 +205,17 @@ shiftsRouter.post(
   })
 );
 
+/** Permanent, and admin-only: it takes the checks and the running log with it. */
+shiftsRouter.delete(
+  '/shifts/:id',
+  requireRole('admin'),
+  ah(async (req, res) => {
+    const shift = await loadShift(req);
+    const deleted = await deleteShift(shift, req.user);
+    res.json({ deleted: true, description: deleted });
+  })
+);
+
 shiftsRouter.post(
   '/shifts/:id/recap/email',
   requireRole('manager'),
@@ -200,7 +230,8 @@ shiftsRouter.post(
 shiftsRouter.get(
   '/shifts/:id/recap.html',
   ah(async (req, res) => {
-    const recap = await buildRecap(req.params.id);
+    const shift = await loadShift(req);
+    const recap = await buildRecap(shift.id);
     if (!recap) fail(404, 'That shift does not exist.');
     res.type('html').send(recapHtml(recap));
   })
@@ -209,7 +240,8 @@ shiftsRouter.get(
 shiftsRouter.get(
   '/shifts/:id/recap.txt',
   ah(async (req, res) => {
-    const recap = await buildRecap(req.params.id);
+    const shift = await loadShift(req);
+    const recap = await buildRecap(shift.id);
     if (!recap) fail(404, 'That shift does not exist.');
     res.type('text/plain; charset=utf-8').send(recapText(recap));
   })

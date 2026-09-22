@@ -190,6 +190,7 @@ document.addEventListener('visibilitychange', async () => {
 /* ------------------------------- chrome ----------------------------- */
 
 function appbar({ title, sub = '', back = null, actions = '', progress = null }) {
+  const logo = state.boot?.logoUrl;
   return `
     <header class="appbar">
       <div class="appbar-row">
@@ -198,6 +199,7 @@ function appbar({ title, sub = '', back = null, actions = '', progress = null })
           <h1>${esc(title)}</h1>
           ${sub ? `<div class="sub">${esc(sub)}</div>` : ''}
         </div>
+        ${logo ? `<img class="appbar-logo" src="${esc(logo)}" alt="" onerror="this.remove()">` : ''}
         ${actions}
       </div>
       ${progress ? `
@@ -249,11 +251,24 @@ function wireMenu(root) {
 
 function renderLogin(message = '') {
   stopPolling();
+  // The login screen is drawn before there's a session, so pick the logo up
+  // from the anonymous bootstrap if we have it.
+  if (state.loginLogo === undefined) {
+    state.loginLogo = null;
+    api('/bootstrap')
+      .then((boot) => {
+        if (boot.logoUrl && document.querySelector('.login-brand img')) {
+          state.loginLogo = boot.logoUrl;
+          document.querySelector('.login-brand img').src = boot.logoUrl;
+        }
+      })
+      .catch(() => {});
+  }
   appEl.innerHTML = `
     <div class="login-wrap">
       <form class="login-card" id="login-form">
         <div class="login-brand">
-          <img src="/icon.svg" alt="">
+          <img src="${esc(state.loginLogo || '/icon.svg')}" alt="" onerror="this.src='/icon.svg'">
           <h1>Captain's Log</h1>
           <p>Sign in to run your shift</p>
         </div>
@@ -475,28 +490,98 @@ async function loadRecent() {
     host.innerHTML = shifts.length
       ? shifts.map(shiftRow).join('')
       : `<div class="empty">No shifts logged yet. Open one above to start.</div>`;
-    host.addEventListener('click', (event) => {
-      const row = event.target.closest('[data-shift-id]');
-      if (row) navigate(`/shift/${row.dataset.shiftId}`);
-    });
+    wireShiftList(host, loadRecent);
   } catch (error) {
     host.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
   }
 }
 
+const TRASH_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/></svg>`;
+
+/** Who ran the shift — the point of the log is that this is never a mystery. */
+function shiftPeople(shift) {
+  const parts = [];
+  if (shift.openedBy) parts.push(`Opened by ${shift.openedBy}`);
+  if (shift.status === 'closed' && shift.closedBy) parts.push(`closed by ${shift.closedBy}`);
+  return parts.join(' · ');
+}
+
 function shiftRow(shift) {
+  const canDelete = state.boot?.user?.role === 'admin';
+  const people = shiftPeople(shift);
+
   return `
-    <button class="rowitem" data-shift-id="${shift.id}">
-      ${ringHtml(shift.percent)}
-      <span class="grow">
-        <span style="display:block;font-weight:600;">${esc(shift.location)} · ${esc(shift.shiftType)}</span>
-        <span class="small muted">${esc(shift.businessDateLabel)}</span>
-      </span>
-      <span class="row" style="gap:6px;">
-        ${shift.flagged ? `<span class="pill flag">⚑ ${shift.flagged}</span>` : ''}
-        <span class="pill ${shift.status}">${shift.status === 'open' ? 'Open' : 'Closed'}</span>
-      </span>
-    </button>`;
+    <div class="rowitem-wrap">
+      <button class="rowitem grow" data-shift-id="${shift.id}">
+        ${ringHtml(shift.percent)}
+        <span class="grow">
+          <span style="display:block;font-weight:600;">${esc(shift.location)} · ${esc(shift.templateName || shift.shiftType)}</span>
+          <span class="small muted">${esc(shift.businessDateLabel)}</span>
+          ${people ? `<span class="tiny muted" style="display:block;margin-top:2px;">${esc(people)}</span>` : ''}
+        </span>
+        <span class="row" style="gap:6px;">
+          ${shift.flagged ? `<span class="pill flag">⚑ ${shift.flagged}</span>` : ''}
+          <span class="pill ${shift.status}">${shift.status === 'open' ? 'Open' : 'Closed'}</span>
+        </span>
+      </button>
+      ${canDelete
+        ? `<button class="row-delete" data-delete-shift="${shift.id}"
+             data-describe="${esc(`${shift.location} · ${shift.templateName || shift.shiftType} · ${shift.businessDateLabel}`)}"
+             aria-label="Delete this shift">${TRASH_SVG}</button>`
+        : ''}
+    </div>`;
+}
+
+/**
+ * Deleting takes the checks and the whole running log with it, so the sheet
+ * names exactly which shift and says plainly that it can't be undone.
+ */
+function confirmDeleteShift(id, description, onDone) {
+  openSheet(
+    `<h2>Delete this shift?</h2>
+     <p class="muted small" style="margin:6px 0 0;">${esc(description)}</p>
+     <div class="error-box" style="margin-top:12px;">
+       Every check, note and log entry for this shift goes with it. This cannot be undone.
+     </div>
+     <div class="error-box" data-error hidden style="margin-top:10px;"></div>
+     <div class="row" style="margin-top:14px;">
+       <button class="btn secondary grow" data-close>Keep it</button>
+       <button class="btn danger grow" data-go>Delete</button>
+     </div>`,
+    (sheet, close) => {
+      const errorBox = sheet.querySelector('[data-error]');
+      sheet.querySelector('[data-go]').addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = 'Deleting…';
+        try {
+          await api(`/shifts/${id}`, { method: 'DELETE' });
+          close();
+          toast('Shift deleted.');
+          onDone?.();
+        } catch (error) {
+          errorBox.textContent = error.message;
+          errorBox.hidden = false;
+          button.disabled = false;
+          button.textContent = 'Delete';
+        }
+      });
+    }
+  );
+}
+
+/** Wire row taps and (for admins) the delete buttons on a list of shifts. */
+function wireShiftList(host, reload) {
+  host.addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-delete-shift]');
+    if (remove) {
+      event.stopPropagation();
+      confirmDeleteShift(remove.dataset.deleteShift, remove.dataset.describe, reload);
+      return;
+    }
+    const row = event.target.closest('[data-shift-id]');
+    if (row) navigate(`/shift/${row.dataset.shiftId}`);
+  });
 }
 
 function ringHtml(percent) {
@@ -1047,10 +1132,7 @@ async function renderHistory() {
     document.getElementById(id).addEventListener('change', load);
   }
 
-  host.addEventListener('click', (event) => {
-    const row = event.target.closest('[data-shift-id]');
-    if (row) navigate(`/shift/${row.dataset.shiftId}`);
-  });
+  wireShiftList(host, load);
 
   load();
 }
@@ -1094,8 +1176,10 @@ async function renderSettings() {
 
 async function renderTeamTab(host) {
   let users = [];
+  let allLocations = state.boot.allLocations || state.boot.locations || [];
   try {
     ({ users } = await api('/admin/users'));
+    ({ locations: allLocations } = await api('/admin/settings'));
   } catch (error) {
     host.innerHTML = `<div class="card"><div class="empty">${esc(error.message)}</div></div>`;
     return;
@@ -1109,6 +1193,9 @@ async function renderTeamTab(host) {
           <span class="grow">
             <span style="display:block;font-weight:600;">${esc(user.name)}${user.active ? '' : ' <span class="muted">(inactive)</span>'}</span>
             <span class="small muted">${esc(user.email)}</span>
+            <span class="tiny muted" style="display:block;margin-top:2px;">
+              ${user.locations?.length ? esc(user.locations.join(', ')) : 'All locations'}
+            </span>
           </span>
           <span class="pill">${esc(user.role)}</span>
         </button>`).join('')}
@@ -1117,15 +1204,16 @@ async function renderTeamTab(host) {
       Staff can run the card. Managers can also close shifts, reopen them and send recaps. Admins manage the team.
     </p>`;
 
-  document.getElementById('add-user').addEventListener('click', () => userSheet(null, host));
+  document.getElementById('add-user').addEventListener('click', () => userSheet(null, host, allLocations));
   host.addEventListener('click', (event) => {
     const row = event.target.closest('[data-user]');
-    if (row) userSheet(users.find((u) => u.id === Number(row.dataset.user)), host);
+    if (row) userSheet(users.find((u) => u.id === Number(row.dataset.user)), host, allLocations);
   });
 }
 
-function userSheet(user, host) {
+function userSheet(user, host, allLocations = []) {
   const editing = Boolean(user);
+  const assigned = new Set(user?.locations || []);
   // Editing yourself is a different job from administering someone else: the
   // reset field would sign you out everywhere and then demand a second new
   // password on the way back in, and the server refuses a self demotion or
@@ -1162,6 +1250,17 @@ function userSheet(user, host) {
                   placeholder="${editing ? 'Leave blank to keep current' : 'At least 8 characters'}">
            <span class="tiny muted">They'll be asked to choose their own on first sign-in${editing ? ', and this signs them out everywhere' : ''}.</span>
          </div>`}
+       <div class="field">
+         <label>Locations</label>
+         <div class="loc-picker">
+           ${allLocations.map((location) => `
+             <label class="loc-option">
+               <input type="checkbox" data-location value="${esc(location)}" ${assigned.has(location) ? 'checked' : ''}>
+               <span>${esc(location)}</span>
+             </label>`).join('')}
+         </div>
+         <span class="tiny muted">Leave all unticked for every location, including ones you add later.</span>
+       </div>
        ${editing ? `
          <label class="row" style="gap:10px;${isSelf ? 'opacity:.55;' : 'cursor:pointer;'}">
            <input type="checkbox" data-active ${user.active ? 'checked' : ''} ${isSelf ? 'disabled' : ''}
@@ -1186,22 +1285,27 @@ function userSheet(user, host) {
         const name = sheet.querySelector('[data-name]').value.trim();
         const role = sheet.querySelector('[data-role]').value;
         const password = sheet.querySelector('[data-password]')?.value || '';
+        const locations = [...sheet.querySelectorAll('[data-location]:checked')].map((box) => box.value);
 
         try {
           if (editing) {
             // Send only what this admin is allowed to change on this account.
-            const body = isSelf ? { name } : { name, role, active: sheet.querySelector('[data-active]').checked };
+            const body = isSelf
+              ? { name, locations }
+              : { name, role, locations, active: sheet.querySelector('[data-active]').checked };
             if (password) body.password = password;
             await api(`/admin/users/${user.id}`, { method: 'PATCH', body });
             toast('Saved.');
           } else {
             await api('/admin/users', {
               method: 'POST',
-              body: { name, role, password, email: sheet.querySelector('[data-email]').value },
+              body: { name, role, password, locations, email: sheet.querySelector('[data-email]').value },
             });
             toast('Team member added.');
           }
           close();
+          // Changing your own assignment changes which locations you can pick.
+          state.boot = await api('/bootstrap');
           renderTeamTab(host);
         } catch (error) {
           errorBox.textContent = error.message;
@@ -1231,9 +1335,10 @@ async function renderShopTab(host) {
           <span class="tiny muted">One per line.</span>
         </div>
         <div class="field">
-          <label>Shift types</label>
-          <textarea class="input" id="s-shifts" rows="2">${esc(settings.shiftTypes.join('\n'))}</textarea>
-          <span class="tiny muted">One per line — AM, PM, Mid, whatever you run.</span>
+          <label>Logo</label>
+          <input class="input" id="s-logo" type="url" inputmode="url" autocapitalize="none" spellcheck="false"
+                 placeholder="https://example.com/logo.png" value="${esc(settings.logoUrl || '')}">
+          <span class="tiny muted">Shown in the bar at the top of every screen. Leave blank for none.</span>
         </div>
         <div class="field">
           <label>Default recap recipients</label>
@@ -1256,7 +1361,7 @@ async function renderShopTab(host) {
         method: 'PUT',
         body: {
           locations: lines('s-locations'),
-          shiftTypes: lines('s-shifts'),
+          logoUrl: document.getElementById('s-logo').value.trim(),
           recapRecipients: lines('s-recipients'),
         },
       });

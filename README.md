@@ -75,9 +75,14 @@ Everything lives in `.env` (see `.env.example` for the annotated list).
 | `SEED_ADMIN_*` | Creates the first admin at startup when the database has no accounts. For hosts without free shell access. |
 | `SEED_ADMIN_RESET` | `true` resets that admin's password instead of creating an account — the way back in if you're locked out. Clear it afterwards. |
 
-Locations and the default recap recipients are edited in the app under
-**Team & settings → Shop**, not in `.env`. Which cards exist is set in
+Locations, the logo and the default recap recipients are edited in the app
+under **Team & settings → Shop**, not in `.env`. Which cards exist is set in
 `src/template.js`.
+
+**The logo** takes an `https://` address or a path to a file you've added under
+`public/`. It sits in the top bar on every screen and on the sign-in card, so a
+white or transparent mark reads best against the navy. If the image fails to
+load it removes itself rather than leaving a broken icon.
 
 ### Email
 
@@ -96,6 +101,13 @@ The recap is always readable in the app and at `/api/shifts/:id/recap.html`.
 | Open a shift, check items, add notes and flags | ● | ● | ● |
 | Close a shift, reopen one, send a recap | | ● | ● |
 | Add and remove people, edit locations and settings | | | ● |
+| Delete a shift and its log | | | ● |
+
+**Locations per person.** Each account can be assigned the locations it may log
+shifts for. Someone assigned to Oceanside sees only Oceanside in the picker, and
+cannot open, read or change a shift anywhere else — not even by URL. Leave the
+assignment empty for access to every location, including ones added later, which
+is what you want for an owner or a floating manager.
 
 A closed shift is read-only — that's what makes the recap trustworthy. If
 something needs fixing after the fact, a manager reopens it, and the reopen is
@@ -260,11 +272,12 @@ npm test                      # embedded Postgres; no setup, no server needed
 scripts/test-postgres.sh      # the same suite against a real Postgres server
 ```
 
-45 tests covering the API, roles and permissions, both cards and the rule that
-an item from one can't be checked on the other, the closed-shift rule, recap
-contents and HTML escaping, concurrent edits from two devices, multi-device
-sign-in, the admin bootstrap and recovery paths, and real SMTP delivery against
-a fake mail server.
+54 tests covering the API, roles and permissions, per-person location access,
+both cards and the rule that an item from one can't be checked on the other,
+the closed-shift rule, admin-only deletion and its audit trail, recap contents
+and HTML escaping, concurrent edits from two devices, multi-device sign-in, the
+admin bootstrap and recovery paths, and real SMTP delivery against a fake mail
+server.
 
 The second command is the one that proves the production path — the network
 driver, connection pooling and transactions — rather than the embedded engine.

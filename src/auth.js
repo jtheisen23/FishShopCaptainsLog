@@ -49,13 +49,55 @@ const ROLE_RANK = { staff: 1, manager: 2, admin: 3 };
 
 export const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
-export async function createUser({ email, name, password, role = 'staff', mustChangePassword = false }) {
+export async function createUser({
+  email,
+  name,
+  password,
+  role = 'staff',
+  mustChangePassword = false,
+  locations = [],
+}) {
   const row = await one(
-    `INSERT INTO users(email, name, role, password_hash, active, must_change_password, created_at)
-     VALUES($1, $2, $3, $4, TRUE, $5, $6) RETURNING id`,
-    [normalizeEmail(email), String(name).trim(), role, hashPassword(password), Boolean(mustChangePassword), nowIso()]
+    `INSERT INTO users(email, name, role, password_hash, active, must_change_password, created_at, locations)
+     VALUES($1, $2, $3, $4, TRUE, $5, $6, $7) RETURNING id`,
+    [
+      normalizeEmail(email),
+      String(name).trim(),
+      role,
+      hashPassword(password),
+      Boolean(mustChangePassword),
+      nowIso(),
+      JSON.stringify(normalizeLocations(locations)),
+    ]
   );
   return findUserById(row.id);
+}
+
+/** Clean a location list: trimmed, de-duplicated, order preserved. */
+export function normalizeLocations(input) {
+  if (!Array.isArray(input)) return [];
+  return [...new Set(input.map((value) => String(value).trim()).filter(Boolean))];
+}
+
+/**
+ * The locations an account may log shifts for. An empty stored list means no
+ * restriction — every location — which is what accounts had before this
+ * existed, and what you want for an owner covering the whole group.
+ */
+export function userLocations(user) {
+  try {
+    const parsed = JSON.parse(user?.locations || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export const isUnrestricted = (user) => userLocations(user).length === 0;
+
+export function canUseLocation(user, location) {
+  const allowed = userLocations(user);
+  return allowed.length === 0 || allowed.includes(location);
 }
 
 export async function findUserByEmail(email) {
@@ -85,6 +127,7 @@ export function publicUser(user) {
     active: Boolean(user.active),
     mustChangePassword: Boolean(user.must_change_password),
     lastLoginAt: user.last_login_at,
+    locations: userLocations(user),
   };
 }
 

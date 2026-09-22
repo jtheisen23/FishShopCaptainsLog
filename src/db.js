@@ -228,8 +228,12 @@ async function migrate() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TEXT NOT NULL,
-      last_login_at TEXT
+      last_login_at TEXT,
+      locations TEXT NOT NULL DEFAULT '[]'
     )`);
+  // Added after the first release. An empty list means every location, which
+  // is what existing accounts had implicitly.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS locations TEXT NOT NULL DEFAULT '[]'`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS sessions (

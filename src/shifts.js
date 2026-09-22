@@ -155,6 +155,25 @@ export async function updateSummary(shift, user, summary) {
   return getShift(shift.id);
 }
 
+/**
+ * Delete a shift and everything logged against it. Checks and events cascade
+ * with the row, so the audit entry is written against no shift at all —
+ * otherwise the record of the deletion would vanish along with it.
+ */
+export async function deleteShift(shift, user) {
+  const description = `${shift.location} · ${getTemplate(shift.template_key).name} · ${shift.business_date}`;
+
+  await transaction(async (tx) => {
+    await tx.query('DELETE FROM shifts WHERE id = $1', [shift.id]);
+    await logEvent(
+      { shiftId: null, userId: user.id, type: 'shift_deleted', detail: description },
+      tx
+    );
+  });
+
+  return description;
+}
+
 export async function markRecapSent(shiftId, user, recipients) {
   await transaction(async (tx) => {
     await tx.query('UPDATE shifts SET recap_sent_at = $1 WHERE id = $2', [nowIso(), Number(shiftId)]);
@@ -365,13 +384,18 @@ export async function shiftDetail(shiftId) {
   };
 }
 
-export async function listShifts({ location, from, to, limit = 60 } = {}) {
+export async function listShifts({ location, from, to, limit = 60, onlyLocations = null } = {}) {
   const where = [];
   const params = [];
 
   if (location) {
     params.push(location);
     where.push(`s.location = $${params.length}`);
+  }
+  // A restricted account only ever sees its own locations' shifts.
+  if (Array.isArray(onlyLocations) && onlyLocations.length) {
+    params.push(onlyLocations);
+    where.push(`s.location = ANY($${params.length})`);
   }
   if (isBusinessDate(from)) {
     params.push(from);

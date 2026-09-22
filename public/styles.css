@@ -888,3 +888,72 @@ select.input {
   border-radius: 3px;
   opacity: .5;
 }
+
+/* --------------------- shift rows with a delete control ----------------- */
+
+.rowitem-wrap {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+}
+
+.rowitem-wrap:last-child { border-bottom: 0; }
+.rowitem-wrap .rowitem { border-bottom: 0; }
+
+.row-delete {
+  flex: none;
+  width: 52px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.row-delete:active { background: var(--bad-soft); color: var(--bad); }
+.row-delete svg { display: block; pointer-events: none; }
+
+/* ------------------------- location assignment -------------------------- */
+
+.loc-picker {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+}
+
+.loc-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.loc-option:active { background: var(--bg); }
+
+.loc-option input {
+  width: 21px;
+  height: 21px;
+  flex: none;
+  accent-color: var(--navy);
+}
+
+/* ------------------------------ brand logo ------------------------------ */
+
+.appbar-logo {
+  flex: none;
+  height: 30px;
+  max-width: 108px;
+  object-fit: contain;
+  /* Sits on the navy bar, so a white or transparent mark works best. */
+}
+
+@media (max-width: 359px) {
+  .appbar-logo { max-width: 72px; }
+}
